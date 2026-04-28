@@ -3,12 +3,11 @@
  * Plugin Name:       UWGS Alt Text Tool
  * Plugin URI:        https://grad.uw.edu
  * Description:       Adds an Alt Text column to the Media Library list view with sortable, filterable,
- *                    and inline-editable alt text. Warns editors when images are missing alt text in
- *                    the media library, attachment edit screen, classic editor modal, and Gutenberg
- *                    pre-publish panel. Shows inline warning on image blocks missing alt text in the
- *                    block editor canvas. Auto-copies caption to alt text if alt is empty.
+ *                    and inline-editable alt text. Warns editors when images are missing alt text at
+ *                    save/publish time in both classic and block editors. Copies caption to alt text
+ *                    server-side on attachment save. Reminds editors to add alt text after upload.
  *                    Built for UW Graduate School.
- * Version:           1.5.0
+ * Version:           1.6.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -26,7 +25,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ACTION  = 'uwgs_alt_text_inline_save';
     const META_KEY      = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY = '_uwgs_needs_alt';
-    const VERSION       = '1.5.0';
+    const VERSION       = '1.6.0';
 
     public static function init() {
         $instance = new self();
@@ -54,6 +53,12 @@ class UWGS_Alt_Text_Tool {
 
         // Flag new image uploads missing alt text
         add_action( 'add_attachment', array( $this, 'flag_new_upload' ) );
+
+        // Server-side: copy caption to alt on attachment save if alt is empty
+        add_filter( 'attachment_fields_to_save', array( $this, 'copy_caption_to_alt' ), 10, 2 );
+
+        // Post-upload reminder on Media -> Add New
+        add_action( 'post-upload-ui', array( $this, 'render_upload_reminder' ) );
 
         // Gutenberg: block canvas warning + pre-publish panel
         add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_block_editor_assets' ) );
@@ -259,6 +264,91 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
+    // SERVER-SIDE: COPY CAPTION TO ALT ON ATTACHMENT SAVE
+    //
+    // Fires when any attachment is saved via the media modal, attachment edit
+    // screen, or REST API. If caption has a value and alt is empty, copies
+    // caption into alt. Does not overwrite existing alt text.
+    // =========================================================================
+
+    public function copy_caption_to_alt( $post, $attachment ) {
+
+        // Only process images
+        if ( ! isset( $post['post_mime_type'] )
+             || strpos( $post['post_mime_type'], 'image/' ) !== 0 ) {
+            return $post;
+        }
+
+        $post_id = isset( $post['ID'] ) ? absint( $post['ID'] ) : 0;
+        if ( ! $post_id ) {
+            return $post;
+        }
+
+        // Get current alt text
+        $current_alt = get_post_meta( $post_id, self::META_KEY, true );
+
+        // Only copy if alt is currently empty
+        if ( ! empty( $current_alt ) ) {
+            return $post;
+        }
+
+        // Get caption from the submitted fields
+        $caption = '';
+        if ( ! empty( $attachment['post_excerpt'] ) ) {
+            $caption = sanitize_text_field( wp_unslash( $attachment['post_excerpt'] ) );
+        } elseif ( ! empty( $post['post_excerpt'] ) ) {
+            $caption = sanitize_text_field( $post['post_excerpt'] );
+        }
+
+        if ( empty( $caption ) ) {
+            return $post;
+        }
+
+        // Copy caption to alt
+        update_post_meta( $post_id, self::META_KEY, $caption );
+
+        // Clear "needs alt" flag since alt is now set
+        delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
+
+        return $post;
+    }
+
+    // =========================================================================
+    // POST-UPLOAD REMINDER: Media -> Add New
+    //
+    // Fires after the upload UI on media-new.php.
+    // Reminds editors to go to the Media Library to add alt text.
+    // =========================================================================
+
+    public function render_upload_reminder() {
+        $library_url = admin_url( 'upload.php?alt_filter=blank' );
+        ?>
+        <div class="uwgs-upload-reminder"
+             role="note"
+             style="
+                margin-top:16px;
+                padding:10px 14px;
+                background:#fff3cd;
+                border-left:4px solid #ffc107;
+                color:#856404;
+                font-size:13px;
+                line-height:1.6;
+                border-radius:0 3px 3px 0;
+                max-width:600px;
+             ">
+            <strong><?php esc_html_e( 'Accessibility reminder:', 'uwgs-alt-text-tool' ); ?></strong>
+            <?php
+            printf(
+                /* translators: %s: URL to media library filtered to blank alt text */
+                esc_html__( ' After uploading, please add alt text to your images. %s', 'uwgs-alt-text-tool' ),
+                '<a href="'. esc_url( $library_url ). '">'. esc_html__( 'View images missing alt text →', 'uwgs-alt-text-tool' ). '</a>'
+            );
+            ?>
+        </div>
+        <?php
+    }
+
+    // =========================================================================
     // ADMIN ASSETS
     // =========================================================================
 
@@ -269,13 +359,8 @@ class UWGS_Alt_Text_Tool {
             $this->enqueue_list_view_assets();
         }
 
-        // Post edit screens: classic editor modal + attachment edit screen
+        // Post edit screens
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
-
-            // Force wp_enqueue_media so wp.media is available on classic editor pages
-            if ( ! did_action( 'wp_enqueue_media' ) ) {
-                wp_enqueue_media();
-            }
 
             // Attachment edit screen: image-only soft block
             global $post;
@@ -288,8 +373,11 @@ class UWGS_Alt_Text_Tool {
                 $this->enqueue_attachment_edit_assets();
             }
 
-            // Classic editor modal warning + caption auto-copy
-            $this->enqueue_classic_modal_assets();
+            // Classic editor: pre-save TinyMCE content scan
+            // Only load when Classic Editor plugin is active (no block editor on this screen)
+            if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
+                $this->enqueue_classic_presave_assets();
+            }
         }
     }
 
@@ -507,200 +595,228 @@ JS;
     }
 
     // -------------------------------------------------------------------------
-    // Classic editor modal: warning + caption auto-copy
+    // Classic editor: pre-save TinyMCE content scan
     //
-    // Key decisions in this version:
-    // - No MediaFrame.extend() — Classic Editor plugin overwrites it after load
-    // - No toolbar view binding —.media-frame-toolbar absent in this modal
-    // - Direct document delegation on.media-button-insert (confirmed in DOM)
-    // - Warning inserted via.insertBefore( '.media-modal.media-button-insert' )
-    // - Caption→alt watches DOM inputs directly (WP 6.4+ Backbone debounce issue)
-    // - All selectors use descendant (space) not compound (dot) notation
+    // Scans TinyMCE content for <img> tags missing alt text when the
+    // Save Draft or Publish button is clicked. Soft block: warns on first
+    // click, allows on second. No dependency on wp.media or modal timing.
     // -------------------------------------------------------------------------
 
-    private function enqueue_classic_modal_assets() {
+    private function enqueue_classic_presave_assets() {
+
+        $css = '
+            #uwgs-presave-warning {
+                display:none;
+                position:fixed;
+                top:32px;
+                left:50%;
+                transform:translateX(-50%);
+                z-index:99999;
+                min-width:320px;
+                max-width:560px;
+                padding:14px 18px;
+                background:#fff3cd;
+                border:2px solid #ffc107;
+                border-radius:4px;
+                color:#856404;
+                font-size:13px;
+                line-height:1.6;
+                box-shadow:0 4px 12px rgba(0,0,0,0.15);
+            }
+            #uwgs-presave-warning.visible {
+                display:block;
+            }
+            #uwgs-presave-warning strong {
+                display:block;
+                margin-bottom:6px;
+                font-size:14px;
+            }
+            #uwgs-presave-warning ul {
+                margin:6px 0 10px 18px;
+                padding:0;
+            }
+            #uwgs-presave-warning.uwgs-warning-actions {
+                margin-top:10px;
+                display:flex;
+                gap:8px;
+                align-items:center;
+            }
+        ';
+
+        wp_register_style( 'uwgs-classic-presave', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-classic-presave' );
+        wp_add_inline_style( 'uwgs-classic-presave', $css );
 
         $i18n = array(
-            'singleWarning' => __( '⚠ Accessibility: "%s" has no alt text. Select the image and add a description in the details panel, or proceed if it is decorative.', 'uwgs-alt-text-tool' ),
-            'multiWarning'  => __( '⚠ Accessibility: %d selected images have no alt text. Add alt text in the details panel for each, or proceed if decorative.', 'uwgs-alt-text-tool' ),
+            'warningTitle'   => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
+            'warningIntro'   => __( 'The following images in this post have no alt text. Please go back and add descriptions, or click "Save anyway" if they are decorative.', 'uwgs-alt-text-tool' ),
+            'saveAnyway'     => __( 'Save anyway', 'uwgs-alt-text-tool' ),
+            'goBack'         => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
+            'unknownImage'   => __( '(image without filename)', 'uwgs-alt-text-tool' ),
         );
 
         wp_add_inline_script(
             'jquery',
-            'var uwgsModalI18n = '. wp_json_encode( $i18n ). ';',
-            'before'
+            'var uwgsPresaveI18n = '. wp_json_encode( $i18n ). ';'
         );
 
         $js = <<<'JS'
-( function( $ ) {
+jQuery( function( $ ) {
 
     'use strict';
 
-    var i18n = ( typeof uwgsModalI18n !== 'undefined' ) ? uwgsModalI18n : {};
+    var i18n      = ( typeof uwgsPresaveI18n !== 'undefined' ) ? uwgsPresaveI18n : {};
+    var $warning  = null;
+    var saveTarget = null; // the button that was clicked
 
     // -----------------------------------------------------------------
-    // HELPERS
+    // Build the warning panel (once, on DOM ready)
     // -----------------------------------------------------------------
 
-    function getMissingAlt() {
+    $warning = $( '<div>' ).attr( {
+            'id':        'uwgs-presave-warning',
+            'role':      'alertdialog',
+            'aria-live': 'assertive',
+            'aria-modal': 'false',
+            'tabindex':  '-1',
+        } );
+
+    $( 'body' ).append( $warning );
+
+    // -----------------------------------------------------------------
+    // Scan TinyMCE content for images missing alt text
+    // Returns array of src/filename strings
+    // -----------------------------------------------------------------
+
+    function scanForMissingAlt() {
         var missing = [];
+        var content = '';
 
-        // Primary: Backbone selection via wp.media.frame
+        // Get content from TinyMCE if active
         if (
-            typeof wp !== 'undefined' &&
-            wp.media &&
-            wp.media.frame
+            typeof window.tinyMCE !== 'undefined' &&
+            tinyMCE.activeEditor &&
+            ! tinyMCE.activeEditor.isHidden()
         ) {
-            try {
-                var state     = wp.media.frame.state();
-                var selection = state && state.get( 'selection' );
-
-                if ( selection && selection.length ) {
-                    selection.each( function( attachment ) {
-                        var mime = attachment.get( 'mime' ) || '';
-                        var alt  = ( attachment.get( 'alt' ) || '' ).trim();
-                        if ( mime.indexOf( 'image/' ) === 0 && alt === '' ) {
-                            missing.push(
-                                attachment.get( 'filename' ) || ( '#' + attachment.get( 'id' ) )
-                            );
-                        }
-                    } );
-                    return missing;
-                }
-            } catch ( e ) {
-                // Fall through to DOM fallback
-            }
+            content = tinyMCE.activeEditor.getContent();
+        } else {
+            // Fallback: read from textarea (Text tab active)
+            content = $( '#content' ).val() || '';
         }
 
-        // Fallback: read alt inputs directly from visible modal DOM
-        $( '.media-modal.attachment-details [data-setting="alt"] input,' +
-           '.media-modal.compat-field-alt input,' +
-           '.media-modal input[name*="[alt]"],' +
-           '.media-modal input[id*="attachment_alt"]'
-        ).each( function() {
-            var altVal = $( this ).val().trim();
-            if ( altVal === '' ) {
-                var $panel   = $( this ).closest(
-                    '.attachment-details,.attachment-info,.compat-attachment-fields'
-                );
-                var filename = $panel.find( '.filename' ).text().trim()
-                            || $panel.find( 'input[name*="[title]"]' ).val()
-                            || 'selected image';
-                missing.push( filename );
+        if ( ! content ) { return missing; }
+
+        // Parse content as HTML to find img tags
+        var $parsed = $( '<div>' ).html( content );
+
+        $parsed.find( 'img' ).each( function() {
+            var alt = ( $( this ).attr( 'alt' ) || '' ).trim();
+            if ( alt === '' ) {
+                var src      = $( this ).attr( 'src' ) || '';
+                var parts    = src.split( '/' );
+                var filename = parts[ parts.length - 1 ] || '';
+                // Strip query strings and size suffixes
+                filename = filename.split( '?' )[0];
+                filename = filename.replace( /-\d+x\d+(\.\w+)$/, '$1' );
+                missing.push( filename || i18n.unknownImage || '(image without filename)' );
             }
         } );
 
         return missing;
     }
 
-    function buildMessage( missing ) {
-        if ( ! missing.length ) { return ''; }
-        if ( missing.length === 1 ) {
-            return ( i18n.singleWarning || '⚠ "%s" has no alt text.' ).replace( '%s', missing[0] );
-        }
-        return ( i18n.multiWarning || '⚠ %d images have no alt text.' ).replace( '%d', missing.length );
+    // -----------------------------------------------------------------
+    // Show warning panel with list of offending images
+    // -----------------------------------------------------------------
+
+    function showWarning( missing ) {
+        $warning.empty();
+
+        var $title = $( '<strong>' ).text( i18n.warningTitle || '⚠ Images missing alt text' );
+        var $intro = $( '<p>' ).css( 'margin', '0 0 6px' ).text( i18n.warningIntro || 'The following images have no alt text:' );
+
+        var $list = $( '<ul>' );
+        missing.forEach( function( filename ) {
+            $list.append( $( '<li>' ).text( filename ) );
+        } );
+
+        var $actions = $( '<div>' ).addClass( 'uwgs-warning-actions' );
+
+        var $goBack = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button button-primary' ).text( i18n.goBack || 'Go back and fix' ).on( 'click', function() {
+                hideWarning();
+                // Return focus to editor
+                if (
+                    typeof window.tinyMCE !== 'undefined' &&
+                    tinyMCE.activeEditor
+                ) {
+                    tinyMCE.activeEditor.focus();
+                }
+            } );
+
+        var $saveAnyway = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button' ).text( i18n.saveAnyway || 'Save anyway' ).on( 'click', function() {
+                hideWarning();
+                // Trigger the original save action directly
+                if ( saveTarget ) {
+                    $( saveTarget ).off( 'click.uwgsPresave' ).trigger( 'click' );
+                }
+            } );
+
+        $actions.append( $goBack ).append( $saveAnyway );
+        $warning.append( $title ).append( $intro ).append( $list ).append( $actions );
+        $warning.addClass( 'visible' );
+        $warning.trigger( 'focus' );
     }
 
-    function showWarning( msg ) {
-        clearWarning();
-        $( '<div>' ).addClass( 'uwgs-modal-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).css( {
-                'display':        'inline-block',
-                'vertical-align': 'middle',
-                'color':          '#856404',
-                'background':     '#fff3cd',
-                'border':         '1px solid #ffc107',
-                'border-radius':  '3px',
-                'font-size':      '12px',
-                'padding':        '5px 8px',
-                'max-width':      '320px',
-                'line-height':    '1.4',
-                'margin-right':   '8px',
-            } ).text( msg ).insertBefore( $( '.media-modal.media-button-insert' ).first() );
-    }
-
-    function clearWarning() {
-        $( '.uwgs-modal-alt-warning' ).remove();
+    function hideWarning() {
+        $warning.removeClass( 'visible' ).empty();
+        saveTarget = null;
     }
 
     // -----------------------------------------------------------------
-    // CAPTION → ALT AUTO-COPY
-    // Watches caption DOM inputs directly inside.media-modal.
-    // Copies to alt field if alt is currently empty.
-    // Broad selectors handle standard wp.media + ACF detail panels.
+    // Intercept Save Draft + Publish buttons
     // -----------------------------------------------------------------
 
-    var captionSelectors = [
-        '.media-modal [data-setting="caption"] input',
-        '.media-modal [data-setting="caption"] textarea',
-        '.media-modal.compat-field-caption input',
-        '.media-modal.compat-field-caption textarea',
-        '.media-modal input[name*="[caption]"]',
-        '.media-modal textarea[name*="[caption]"]'
+    // Classic editor save/publish buttons
+    var saveSelectors = [
+        '#publish',
+        '#save-post',
+        'input[name="save"]',
+        'input[name="publish"]',
     ].join( ', ' );
 
-    var altSelectors = [
-        '[data-setting="alt"] input',
-        '.compat-field-alt input',
-        'input[name*="[alt]"]',
-        'input[id*="attachment_alt"]'
-    ].join( ', ' );
+    $( document ).on( 'click.uwgsPresave', saveSelectors, function( e ) {
 
-    $( document ).on( 'input.uwgsCap change.uwgsCap', captionSelectors, function() {
-        var capVal = $( this ).val().trim();
-        if ( ! capVal ) { return; }
-
-        var $panel = $( this ).closest(
-            '.attachment-details,.attachment-info,.compat-attachment-fields,.media-sidebar'
-        );
-        var $altField = $panel.length
-            ? $panel.find( altSelectors ).first()
-            : $( '.media-modal' ).find( altSelectors ).first();
-
-        if ( ! $altField.length ) { return; }
-
-        if ( $altField.val().trim() === '' ) {
-            $altField.val( capVal ).trigger( 'change' );
-
-            // Sync to Backbone model if accessible
-            if ( typeof wp !== 'undefined' && wp.media && wp.media.frame ) {
-                try {
-                    var state     = wp.media.frame.state();
-                    var selection = state && state.get( 'selection' );
-                    if ( selection && selection.length === 1 ) {
-                        selection.first().set( 'alt', capVal );
-                    }
-                } catch ( e ) { /* non-fatal */ }
-            }
+        // Don't intercept if warning is already showing (Save anyway handles it)
+        if ( $warning.hasClass( 'visible' ) ) {
+            return true;
         }
-    } );
 
-    // -----------------------------------------------------------------
-    // INSERT BUTTON WARNING
-    // Delegates on document →.media-button-insert (confirmed in DOM).
-    // Soft warning only — does not block insert.
-    // Warning positioned via insertBefore on the confirmed button selector.
-    // -----------------------------------------------------------------
+        // Don't intercept autosave or quick edit
+        if ( $( this ).closest( '#autosave,.inline-edit-row' ).length ) {
+            return true;
+        }
 
-    $( document ).on( 'click.uwgsInsert', '.media-button-insert', function() {
-        var missing = getMissingAlt();
+        var missing = scanForMissingAlt();
+
         if ( ! missing.length ) {
-            clearWarning();
-            return;
+            return true; // All good — allow save
         }
-        showWarning( buildMessage( missing ) );
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        saveTarget = this;
+        showWarning( missing );
+        return false;
     } );
 
-    // Clear warning on modal close
-    $( document ).on( 'click.uwgsClose', '.media-modal-close', clearWarning );
+    // Dismiss warning on Escape key
+    $( document ).on( 'keydown.uwgsPresave', function( e ) {
+        if ( 27 === e.which && $warning.hasClass( 'visible' ) ) {
+            hideWarning();
+        }
+    } );
 
-    // Clear warning when a different attachment or menu item is selected
-    $( document ).on(
-        'click.uwgsClear',
-        '.attachment-preview,.media-menu-item',
-        clearWarning
-    );
-
-} )( jQuery );
+} );
 JS;
 
         wp_add_inline_script( 'jquery', $js, 'after' );
@@ -721,7 +837,6 @@ JS;
             'warningIntro'   => __( 'The following images are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
             'decorativeNote' => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
             'noFilename'     => __( '(no filename)', 'uwgs-alt-text-tool' ),
-            // Note: no leading ⚠ here — the icon span renders it separately
             'canvasBanner'   => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
         );
 
@@ -747,18 +862,14 @@ JS;
         ? wp.editor.PluginPrePublishPanel
         : ( wp.editPost ? wp.editPost.PluginPrePublishPanel : null );
 
-    var useSelect  = wp.data   ? wp.data.useSelect                        : null;
-    var addFilter  = wp.hooks  ? wp.hooks.addFilter                       : null;
-    var createHOC  = wp.compose ? wp.compose.createHigherOrderComponent   : null;
+    var useSelect = wp.data    ? wp.data.useSelect                      : null;
+    var addFilter = wp.hooks   ? wp.hooks.addFilter                     : null;
+    var createHOC = wp.compose ? wp.compose.createHigherOrderComponent  : null;
 
     // -----------------------------------------------------------------
     // BLOCK CANVAS WARNING
     // HOC wraps core/image BlockEdit.
-    // Shows yellow banner below image when URL is set but alt is empty.
-    // Note: renders inside editor iframe only when all blocks use
-    // apiVersion 3+. Currently forced to non-iframe by third-party blocks.
-    // When those blocks are updated, this will need a proper enqueued
-    // script file loaded inside the iframe context.
+    // Shows yellow banner below image when URL set but alt is empty.
     // -----------------------------------------------------------------
 
     if ( addFilter && createHOC ) {
@@ -803,11 +914,8 @@ JS;
                                 'aria-live': 'polite',
                                 className:   'uwgs-block-alt-warning',
                             },
-                            // Single icon span — canvasBanner string has no ⚠ prefix
                             el( 'span', { 'aria-hidden': 'true' }, '⚠' ),
-                            el( 'span', null,
-                                i18n.canvasBanner || 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.'
-                            )
+                            el( 'span', null, i18n.canvasBanner || 'Missing alt text — add it in the sidebar.' )
                         )
                         : null
                 );
