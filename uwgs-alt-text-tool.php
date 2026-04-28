@@ -8,7 +8,7 @@
  *                    pre-publish panel. Shows inline warning on image blocks missing alt text in the
  *                    block editor canvas. Auto-copies caption to alt text if alt is empty.
  *                    Built for UW Graduate School.
- * Version:           1.4.5
+ * Version:           1.5.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -26,7 +26,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ACTION  = 'uwgs_alt_text_inline_save';
     const META_KEY      = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY = '_uwgs_needs_alt';
-    const VERSION       = '1.4.0';
+    const VERSION       = '1.5.0';
 
     public static function init() {
         $instance = new self();
@@ -272,8 +272,7 @@ class UWGS_Alt_Text_Tool {
         // Post edit screens: classic editor modal + attachment edit screen
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
 
-            // Force wp_enqueue_media so media-views and wp.media are available
-            // Classic Editor plugin does not always call this early enough
+            // Force wp_enqueue_media so wp.media is available on classic editor pages
             if ( ! did_action( 'wp_enqueue_media' ) ) {
                 wp_enqueue_media();
             }
@@ -440,8 +439,10 @@ JS;
                 display:none; margin-top:6px; padding:8px 10px;
                 background:#fff3cd; border-left:4px solid #ffc107;
                 color:#856404; font-size:13px; border-radius:0 3px 3px 0;
-            }.uwgs-attachment-alt-warning.visible    { display:block; }
-            #attachment_alt.uwgs-field-highlight    {
+            }.uwgs-attachment-alt-warning.visible {
+                display:block;
+            }
+            #attachment_alt.uwgs-field-highlight {
                 border-color:#c62828 !important;
                 box-shadow:0 0 0 1px #c62828 !important;
             }
@@ -507,24 +508,30 @@ JS;
 
     // -------------------------------------------------------------------------
     // Classic editor modal: warning + caption auto-copy
-    // Attached to 'jquery' handle which is always present on post edit screens.
-    // Uses a polling guard to wait for wp.media to be ready before binding.
+    //
+    // Key decisions in this version:
+    // - No MediaFrame.extend() — Classic Editor plugin overwrites it after load
+    // - No toolbar view binding —.media-frame-toolbar absent in this modal
+    // - Direct document delegation on.media-button-insert (confirmed in DOM)
+    // - Warning inserted via.insertBefore( '.media-modal.media-button-insert' )
+    // - Caption→alt watches DOM inputs directly (WP 6.4+ Backbone debounce issue)
+    // - All selectors use descendant (space) not compound (dot) notation
     // -------------------------------------------------------------------------
 
-private function enqueue_classic_modal_assets() {
+    private function enqueue_classic_modal_assets() {
 
-    $i18n = array(
-        'singleWarning' => __( '⚠ Accessibility: "%s" has no alt text. Select the image and add a description in the details panel, or proceed if it is decorative.', 'uwgs-alt-text-tool' ),
-        'multiWarning'  => __( '⚠ Accessibility: %d selected images have no alt text. Add alt text in the details panel for each, or proceed if decorative.', 'uwgs-alt-text-tool' ),
-    );
+        $i18n = array(
+            'singleWarning' => __( '⚠ Accessibility: "%s" has no alt text. Select the image and add a description in the details panel, or proceed if it is decorative.', 'uwgs-alt-text-tool' ),
+            'multiWarning'  => __( '⚠ Accessibility: %d selected images have no alt text. Add alt text in the details panel for each, or proceed if decorative.', 'uwgs-alt-text-tool' ),
+        );
 
-    wp_add_inline_script(
-        'jquery',
-        'var uwgsModalI18n = '. wp_json_encode( $i18n ). ';',
-        'before'
-    );
+        wp_add_inline_script(
+            'jquery',
+            'var uwgsModalI18n = '. wp_json_encode( $i18n ). ';',
+            'before'
+        );
 
-    $js = <<<'JS'
+        $js = <<<'JS'
 ( function( $ ) {
 
     'use strict';
@@ -535,15 +542,10 @@ private function enqueue_classic_modal_assets() {
     // HELPERS
     // -----------------------------------------------------------------
 
-    /**
-     * Get filenames of selected images missing alt text.
-     * Reads from wp.media.frame selection if available,
-     * falls back to reading visible attachment detail fields in the DOM.
-     */
     function getMissingAlt() {
         var missing = [];
 
-        // Primary: use wp.media Backbone selection
+        // Primary: Backbone selection via wp.media.frame
         if (
             typeof wp !== 'undefined' &&
             wp.media &&
@@ -570,17 +572,17 @@ private function enqueue_classic_modal_assets() {
             }
         }
 
-        // Fallback: read alt text input directly from visible modal DOM
-        // Handles cases where Backbone selection is not accessible
+        // Fallback: read alt inputs directly from visible modal DOM
         $( '.media-modal.attachment-details [data-setting="alt"] input,' +
            '.media-modal.compat-field-alt input,' +
-           '.media-modal input[name="attachments[*][alt]"],' +
+           '.media-modal input[name*="[alt]"],' +
            '.media-modal input[id*="attachment_alt"]'
         ).each( function() {
             var altVal = $( this ).val().trim();
             if ( altVal === '' ) {
-                // Try to get filename from nearby elements
-                var $panel   = $( this ).closest( '.attachment-details,.attachment-info,.compat-attachment-fields' );
+                var $panel   = $( this ).closest(
+                    '.attachment-details,.attachment-info,.compat-attachment-fields'
+                );
                 var filename = $panel.find( '.filename' ).text().trim()
                             || $panel.find( 'input[name*="[title]"]' ).val()
                             || 'selected image';
@@ -599,25 +601,20 @@ private function enqueue_classic_modal_assets() {
         return ( i18n.multiWarning || '⚠ %d images have no alt text.' ).replace( '%d', missing.length );
     }
 
-    /**
-     * Show warning adjacent to the insert button.
-     * Inserts directly before.media-button-insert since there is
-     * no toolbar wrapper element in this Classic Editor modal structure.
-     */
     function showWarning( msg ) {
         clearWarning();
         $( '<div>' ).addClass( 'uwgs-modal-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).css( {
-                'display':       'inline-block',
-                'vertical-align':'middle',
-                'color':         '#856404',
-                'background':    '#fff3cd',
-                'border':        '1px solid #ffc107',
-                'border-radius': '3px',
-                'font-size':     '12px',
-                'padding':       '5px 8px',
-                'max-width':     '320px',
-                'line-height':   '1.4',
-                'margin-right':  '8px',
+                'display':        'inline-block',
+                'vertical-align': 'middle',
+                'color':          '#856404',
+                'background':     '#fff3cd',
+                'border':         '1px solid #ffc107',
+                'border-radius':  '3px',
+                'font-size':      '12px',
+                'padding':        '5px 8px',
+                'max-width':      '320px',
+                'line-height':    '1.4',
+                'margin-right':   '8px',
             } ).text( msg ).insertBefore( $( '.media-modal.media-button-insert' ).first() );
     }
 
@@ -627,10 +624,9 @@ private function enqueue_classic_modal_assets() {
 
     // -----------------------------------------------------------------
     // CAPTION → ALT AUTO-COPY
-    // Watch caption input fields in the modal DOM directly.
-    // Fires on input/change; copies to alt field if alt is empty.
-    // Uses broad selectors to handle both standard wp.media panels
-    // and ACF-rendered attachment detail panels.
+    // Watches caption DOM inputs directly inside.media-modal.
+    // Copies to alt field if alt is currently empty.
+    // Broad selectors handle standard wp.media + ACF detail panels.
     // -----------------------------------------------------------------
 
     var captionSelectors = [
@@ -639,22 +635,21 @@ private function enqueue_classic_modal_assets() {
         '.media-modal.compat-field-caption input',
         '.media-modal.compat-field-caption textarea',
         '.media-modal input[name*="[caption]"]',
-        '.media-modal textarea[name*="[caption]"]',
+        '.media-modal textarea[name*="[caption]"]'
     ].join( ', ' );
 
     var altSelectors = [
         '[data-setting="alt"] input',
         '.compat-field-alt input',
         'input[name*="[alt]"]',
-        'input[id*="attachment_alt"]',
+        'input[id*="attachment_alt"]'
     ].join( ', ' );
 
     $( document ).on( 'input.uwgsCap change.uwgsCap', captionSelectors, function() {
-        var capVal  = $( this ).val().trim();
+        var capVal = $( this ).val().trim();
         if ( ! capVal ) { return; }
 
-        // Find the alt field in the same attachment panel
-        var $panel    = $( this ).closest(
+        var $panel = $( this ).closest(
             '.attachment-details,.attachment-info,.compat-attachment-fields,.media-sidebar'
         );
         var $altField = $panel.length
@@ -663,15 +658,11 @@ private function enqueue_classic_modal_assets() {
 
         if ( ! $altField.length ) { return; }
 
-        var altVal = $altField.val().trim();
-        if ( altVal === '' ) {
+        if ( $altField.val().trim() === '' ) {
             $altField.val( capVal ).trigger( 'change' );
 
-            // Also sync to Backbone model if accessible
-            if (
-                typeof wp !== 'undefined' &&
-                wp.media && wp.media.frame
-            ) {
+            // Sync to Backbone model if accessible
+            if ( typeof wp !== 'undefined' && wp.media && wp.media.frame ) {
                 try {
                     var state     = wp.media.frame.state();
                     var selection = state && state.get( 'selection' );
@@ -684,28 +675,25 @@ private function enqueue_classic_modal_assets() {
     } );
 
     // -----------------------------------------------------------------
-    // INSERT BUTTON: WARNING ON CLICK
-    // Delegate on document →.media-button-insert.
-    // Confirmed present in this Classic Editor modal structure.
-    // Does not block insert — soft warning only.
+    // INSERT BUTTON WARNING
+    // Delegates on document →.media-button-insert (confirmed in DOM).
+    // Soft warning only — does not block insert.
+    // Warning positioned via insertBefore on the confirmed button selector.
     // -----------------------------------------------------------------
 
     $( document ).on( 'click.uwgsInsert', '.media-button-insert', function() {
         var missing = getMissingAlt();
-
         if ( ! missing.length ) {
             clearWarning();
-            return; // All good
+            return;
         }
-
         showWarning( buildMessage( missing ) );
-        // Soft block: do NOT preventDefault — warn but allow insert
     } );
 
-    // Clear warning when modal closes or selection changes
+    // Clear warning on modal close
     $( document ).on( 'click.uwgsClose', '.media-modal-close', clearWarning );
 
-    // Clear when a different attachment is selected
+    // Clear warning when a different attachment or menu item is selected
     $( document ).on(
         'click.uwgsClear',
         '.attachment-preview,.media-menu-item',
@@ -715,8 +703,8 @@ private function enqueue_classic_modal_assets() {
 } )( jQuery );
 JS;
 
-    wp_add_inline_script( 'jquery', $js, 'after' );
-}
+        wp_add_inline_script( 'jquery', $js, 'after' );
+    }
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
@@ -728,12 +716,13 @@ JS;
         }
 
         $i18n = array(
-            'panelTitle'      => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
-            'allGood'         => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
-            'warningIntro'    => __( 'The following images are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
-            'decorativeNote'  => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
-            'noFilename'      => __( '(no filename)', 'uwgs-alt-text-tool' ),
-            'canvasBanner'    => __( '⚠ Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
+            'panelTitle'     => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
+            'allGood'        => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
+            'warningIntro'   => __( 'The following images are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
+            'decorativeNote' => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
+            'noFilename'     => __( '(no filename)', 'uwgs-alt-text-tool' ),
+            // Note: no leading ⚠ here — the icon span renders it separately
+            'canvasBanner'   => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
         );
 
         wp_add_inline_script(
@@ -748,29 +737,36 @@ JS;
 
     if ( typeof wp === 'undefined' ) { return; }
 
-    var el                    = wp.element.createElement;
-    var Fragment              = wp.element.Fragment;
-    var useState              = wp.element.useState;
-    var useEffect             = wp.element.useEffect;
-    var registerPlugin        = wp.plugins ? wp.plugins.registerPlugin : null;
-    var PluginPrePublishPanel = wp.editPost ? wp.editPost.PluginPrePublishPanel : null;
-    var useSelect             = wp.data ? wp.data.useSelect : null;
-    var addFilter             = wp.hooks ? wp.hooks.addFilter : null;
-    var createHOC             = wp.compose ? wp.compose.createHigherOrderComponent : null;
+    var el       = wp.element.createElement;
+    var Fragment = wp.element.Fragment;
+
+    var registerPlugin = wp.plugins ? wp.plugins.registerPlugin : null;
+
+    // WP 6.6+: use wp.editor; fall back to wp.editPost for older versions
+    var PluginPrePublishPanel = ( wp.editor && wp.editor.PluginPrePublishPanel )
+        ? wp.editor.PluginPrePublishPanel
+        : ( wp.editPost ? wp.editPost.PluginPrePublishPanel : null );
+
+    var useSelect  = wp.data   ? wp.data.useSelect                        : null;
+    var addFilter  = wp.hooks  ? wp.hooks.addFilter                       : null;
+    var createHOC  = wp.compose ? wp.compose.createHigherOrderComponent   : null;
 
     // -----------------------------------------------------------------
-    // BLOCK CANVAS WARNING (HOC on core/image)
-    // Wraps every core/image block edit view.
-    // Shows a yellow banner below the image if alt text is empty.
+    // BLOCK CANVAS WARNING
+    // HOC wraps core/image BlockEdit.
+    // Shows yellow banner below image when URL is set but alt is empty.
+    // Note: renders inside editor iframe only when all blocks use
+    // apiVersion 3+. Currently forced to non-iframe by third-party blocks.
+    // When those blocks are updated, this will need a proper enqueued
+    // script file loaded inside the iframe context.
     // -----------------------------------------------------------------
 
-    if ( addFilter && createHOC && wp.element ) {
+    if ( addFilter && createHOC ) {
 
         var withAltWarning = createHOC( function( BlockEdit ) {
 
             return function( props ) {
 
-                // Only apply to core/image blocks
                 if ( props.name !== 'core/image' ) {
                     return el( BlockEdit, props );
                 }
@@ -780,26 +776,24 @@ JS;
                 var hasImage = url !== '';
                 var hasAlt   = alt.trim() !== '';
 
-                // Banner styles
                 var bannerStyle = {
-                    display:        'flex',
-                    alignItems:     'center',
-                    gap:            '8px',
-                    margin:         '4px 0 0',
-                    padding:        '8px 12px',
-                    background:     '#fff3cd',
-                    borderLeft:     '4px solid #ffc107',
-                    color:          '#856404',
-                    fontSize:       '13px',
-                    lineHeight:     '1.5',
-                    borderRadius:   '0 3px 3px 0',
+                    display:      'flex',
+                    alignItems:   'center',
+                    gap:          '8px',
+                    margin:       '4px 0 0',
+                    padding:      '8px 12px',
+                    background:   '#fff3cd',
+                    borderLeft:   '4px solid #ffc107',
+                    color:        '#856404',
+                    fontSize:     '13px',
+                    lineHeight:   '1.5',
+                    borderRadius: '0 3px 3px 0',
                 };
 
                 return el(
                     Fragment,
                     null,
                     el( BlockEdit, props ),
-                    // Only show banner when image has a URL but no alt text
                     ( hasImage && ! hasAlt )
                         ? el(
                             'div',
@@ -809,9 +803,10 @@ JS;
                                 'aria-live': 'polite',
                                 className:   'uwgs-block-alt-warning',
                             },
+                            // Single icon span — canvasBanner string has no ⚠ prefix
                             el( 'span', { 'aria-hidden': 'true' }, '⚠' ),
                             el( 'span', null,
-                                i18n.canvasBanner || '⚠ Missing alt text — click this image, then add alt text in the sidebar panel on the right.'
+                                i18n.canvasBanner || 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.'
                             )
                         )
                         : null
@@ -920,8 +915,6 @@ JS;
 );
 JS;
 
-        // wp-blocks is enqueued before wp-edit-post and is the right
-        // dependency anchor for addFilter on editor.BlockEdit
         wp_add_inline_script( 'wp-edit-post', $js, 'after' );
     }
 
