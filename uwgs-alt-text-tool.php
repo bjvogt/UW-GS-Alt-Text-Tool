@@ -8,7 +8,7 @@
  *                    pre-publish panel. Shows inline warning on image blocks missing alt text in the
  *                    block editor canvas. Auto-copies caption to alt text if alt is empty.
  *                    Built for UW Graduate School.
- * Version:           1.4.0
+ * Version:           1.4.5
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -511,309 +511,212 @@ JS;
     // Uses a polling guard to wait for wp.media to be ready before binding.
     // -------------------------------------------------------------------------
 
-    private function enqueue_classic_modal_assets() {
+private function enqueue_classic_modal_assets() {
 
-        $i18n = array(
-            'singleWarning' => __( '⚠ Accessibility: "%s" has no alt text. Edit the image details to add a description, or proceed if it is decorative.', 'uwgs-alt-text-tool' ),
-            'multiWarning'  => __( '⚠ Accessibility: %d selected images have no alt text. Edit each image to add alt text, or proceed if decorative.', 'uwgs-alt-text-tool' ),
-        );
+    $i18n = array(
+        'singleWarning' => __( '⚠ Accessibility: "%s" has no alt text. Select the image and add a description in the details panel, or proceed if it is decorative.', 'uwgs-alt-text-tool' ),
+        'multiWarning'  => __( '⚠ Accessibility: %d selected images have no alt text. Add alt text in the details panel for each, or proceed if decorative.', 'uwgs-alt-text-tool' ),
+    );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsModalI18n = '. wp_json_encode( $i18n ). ';'
-        );
+    wp_add_inline_script(
+        'jquery',
+        'var uwgsModalI18n = '. wp_json_encode( $i18n ). ';',
+        'before'
+    );
 
-        $js = <<<'JS'
-( function() {
+    $js = <<<'JS'
+( function( $ ) {
 
     'use strict';
 
+    var i18n = ( typeof uwgsModalI18n !== 'undefined' ) ? uwgsModalI18n : {};
+
+    // -----------------------------------------------------------------
+    // HELPERS
+    // -----------------------------------------------------------------
+
     /**
-     * Poll until wp.media.view.MediaFrame is available, then bind.
-     * This handles the Classic Editor plugin's deferred media script loading.
-     * Gives up after 10 seconds (100 attempts × 100ms).
+     * Get filenames of selected images missing alt text.
+     * Reads from wp.media.frame selection if available,
+     * falls back to reading visible attachment detail fields in the DOM.
      */
-    var attempts = 0;
-    var maxAttempts = 100;
+    function getMissingAlt() {
+        var missing = [];
 
-    function waitForMedia() {
-        attempts++;
+        // Primary: use wp.media Backbone selection
+        if (
+            typeof wp !== 'undefined' &&
+            wp.media &&
+            wp.media.frame
+        ) {
+            try {
+                var state     = wp.media.frame.state();
+                var selection = state && state.get( 'selection' );
 
-        var wpOk = (
-            typeof window.wp !== 'undefined' &&
-            typeof window.wp.media !== 'undefined' &&
-            typeof window.wp.media.view !== 'undefined' &&
-            typeof window.wp.media.view.MediaFrame !== 'undefined'
-        );
-
-        if ( wpOk ) {
-            initMediaHooks();
-            return;
-        }
-
-        if ( attempts < maxAttempts ) {
-            setTimeout( waitForMedia, 100 );
-        }
-        // Silently give up if wp.media never loads (non-editor page)
-    }
-
-    function initMediaHooks() {
-
-        var $ = window.jQuery;
-        if ( ! $ ) { return; }
-
-        var i18n = ( typeof uwgsModalI18n !== 'undefined' ) ? uwgsModalI18n : {};
-
-        // -----------------------------------------------------------------
-        // HELPERS
-        // -----------------------------------------------------------------
-
-        function getMissingAlt( frame ) {
-            if ( ! frame ) { return []; }
-            var state = frame.state ? frame.state() : null;
-            if ( ! state ) { return []; }
-            var selection = state.get ? state.get( 'selection' ) : null;
-            if ( ! selection ) { return []; }
-
-            var missing = [];
-            selection.each( function( attachment ) {
-                var mime = attachment.get( 'mime' ) || '';
-                var alt  = ( attachment.get( 'alt' ) || '' ).trim();
-                if ( mime.indexOf( 'image/' ) === 0 && alt === '' ) {
-                    missing.push(
-                        attachment.get( 'filename' ) || ( '#' + attachment.get( 'id' ) )
-                    );
-                }
-            } );
-            return missing;
-        }
-
-        function buildMessage( missing ) {
-            if ( ! missing.length ) { return ''; }
-            if ( missing.length === 1 ) {
-                return ( i18n.singleWarning || '⚠ "%s" has no alt text.' ).replace( '%s', missing[0] );
-            }
-            return ( i18n.multiWarning || '⚠ %d images have no alt text.' ).replace( '%d', missing.length );
-        }
-
-        function showWarning( $toolbar, msg ) {
-            $toolbar.find( '.uwgs-modal-alt-warning' ).remove();
-            $( '<div>' ).addClass( 'uwgs-modal-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).css( {
-                    'color':         '#856404',
-                    'background':    '#fff3cd',
-                    'border':        '1px solid #ffc107',
-                    'border-radius': '3px',
-                    'font-size':     '12px',
-                    'padding':       '5px 8px',
-                    'max-width':     '320px',
-                    'line-height':   '1.4',
-                    'margin-right':  '8px',
-                    'align-self':    'center',
-                    'display':       'inline-block',
-                } ).text( msg ).prependTo( $toolbar );
-        }
-
-        function clearWarning( $toolbar ) {
-            if ( $toolbar && $toolbar.length ) {
-                $toolbar.find( '.uwgs-modal-alt-warning' ).remove();
-            } else {
-                $( '.uwgs-modal-alt-warning' ).remove();
-            }
-        }
-
-        // -----------------------------------------------------------------
-        // CAPTION → ALT AUTO-COPY
-        // Watch the attachment details panel DOM directly.
-        // More reliable than Backbone model events in WP 6.4+.
-        // -----------------------------------------------------------------
-
-        function bindCaptionWatcher( frame ) {
-            if ( ! frame ) { return; }
-
-            // Re-bind every time the attachment details panel content changes
-            frame.on( 'selection:toggle', function() {
-                watchCaptionFields( frame );
-            } );
-
-            frame.on( 'content:render:browse', function() {
-                // Short delay to allow panel DOM to render
-                setTimeout( function() {
-                    watchCaptionFields( frame );
-                }, 200 );
-            } );
-
-            // Also watch for new uploads completing
-            var state = frame.state ? frame.state() : null;
-            if ( state ) {
-                var library = state.get ? state.get( 'library' ) : null;
-                if ( library ) {
-                    library.on( 'add', function( attachment ) {
-                        setTimeout( function() {
-                            watchCaptionFields( frame );
-                            // Also watch model directly for caption set on upload
-                            attachment.on( 'change:caption', function( model, caption ) {
-                                var alt    = ( model.get( 'alt' ) || '' ).trim();
-                                var capVal = ( caption || '' ).trim();
-                                if ( alt === '' && capVal !== '' ) {
-                                    model.set( 'alt', capVal );
-                                    // Sync to DOM field if visible
-                                    syncAltFieldFromModel( model );
-                                }
-                            } );
-                        }, 300 );
-                    } );
-                }
-            }
-        }
-
-        /**
-         * Watch caption input fields in the media modal DOM.
-         * When caption changes and alt is empty, copy caption to alt
-         * and sync to the alt input field so the editor sees it.
-         */
-        function watchCaptionFields( frame ) {
-            // Unbind previous watchers to avoid duplicates
-            $( '.media-modal' ).off( 'input.uwgsCap change.uwgsCap', '[data-setting="caption"] input, [data-setting="caption"] textarea' );
-
-            $( '.media-modal' ).on(
-                'input.uwgsCap change.uwgsCap',
-                '[data-setting="caption"] input, [data-setting="caption"] textarea',
-                function() {
-                    var capVal  = $( this ).val().trim();
-                    var $panel  = $( this ).closest( '.attachment-details,.attachment-info' );
-                    var $altInput = $panel.find( '[data-setting="alt"] input' );
-
-                    if ( ! $altInput.length ) { return; }
-
-                    var altVal = $altInput.val().trim();
-
-                    // Only copy if alt is currently empty
-                    if ( altVal === '' && capVal !== '' ) {
-                        $altInput.val( capVal ).trigger( 'change' );
-                    }
-                }
-            );
-        }
-
-        /**
-         * Sync alt text from a Backbone model back to the visible DOM input
-         */
-        function syncAltFieldFromModel( model ) {
-            var altVal = ( model.get( 'alt' ) || '' );
-            $( '.media-modal [data-setting="alt"] input' ).each( function() {
-                // Only update if this field corresponds to the right attachment
-                // (check by looking at the closest attachment panel)
-                var $panel = $( this ).closest( '.attachment-details' );
-                if ( $panel.length && $( this ).val().trim() === '' && altVal !== '' ) {
-                    $( this ).val( altVal ).trigger( 'change' );
-                }
-            } );
-        }
-
-        // -----------------------------------------------------------------
-        // INSERT WARNING
-        // Bind to toolbar:render:insert for reliable post-DOM timing.
-        // Also bind a document-level fallback scoped to.media-modal.
-        // -----------------------------------------------------------------
-
-        function bindInsertWarning( frame ) {
-            if ( ! frame ) { return; }
-
-            frame.on( 'toolbar:render:insert', function( toolbarView ) {
-                if ( ! toolbarView ) { return; }
-
-                var $toolbar = toolbarView.$el;
-
-                // Try direct button view binding first
-                var insertBtn = toolbarView.get ? toolbarView.get( 'insert' ) : null;
-                if ( insertBtn && insertBtn.$el && insertBtn.$el.length ) {
-                    insertBtn.$el.off( 'click.uwgsWarn' ).on( 'click.uwgsWarn', function() {
-                        var missing = getMissingAlt( frame );
-                        missing.length
-                            ? showWarning( $toolbar, buildMessage( missing ) )
-                            : clearWarning( $toolbar );
-                    } );
-                } else {
-                    // Fallback: delegate within toolbar only
-                    $toolbar.off( 'click.uwgsWarn' ).on(
-                        'click.uwgsWarn',
-                        '.media-button-insert,.media-button-select',
-                        function() {
-                            var missing = getMissingAlt( frame );
-                            missing.length
-                                ? showWarning( $toolbar, buildMessage( missing ) )
-                                : clearWarning( $toolbar );
+                if ( selection && selection.length ) {
+                    selection.each( function( attachment ) {
+                        var mime = attachment.get( 'mime' ) || '';
+                        var alt  = ( attachment.get( 'alt' ) || '' ).trim();
+                        if ( mime.indexOf( 'image/' ) === 0 && alt === '' ) {
+                            missing.push(
+                                attachment.get( 'filename' ) || ( '#' + attachment.get( 'id' ) )
+                            );
                         }
-                    );
+                    } );
+                    return missing;
                 }
-
-                // Clear warning when selection changes
-                var state = frame.state ? frame.state() : null;
-                if ( state ) {
-                    var sel = state.get ? state.get( 'selection' ) : null;
-                    if ( sel ) {
-                        sel.on( 'add remove reset', function() {
-                            clearWarning( $toolbar );
-                        } );
-                    }
-                }
-            } );
-
-            // Gallery toolbar
-            frame.on( 'toolbar:render:gallery-edit', function( toolbarView ) {
-                if ( ! toolbarView ) { return; }
-                var $toolbar = toolbarView.$el;
-                $toolbar.off( 'click.uwgsWarn' ).on(
-                    'click.uwgsWarn',
-                    '.media-button-gallery',
-                    function() {
-                        var missing = getMissingAlt( frame );
-                        if ( missing.length ) {
-                            showWarning( $toolbar, buildMessage( missing ) );
-                        }
-                    }
-                );
-            } );
-
-            frame.on( 'close escape', function() {
-                clearWarning( null );
-            } );
+            } catch ( e ) {
+                // Fall through to DOM fallback
+            }
         }
 
-        // -----------------------------------------------------------------
-        // EXTEND MediaFrame to bind on every open
-        // -----------------------------------------------------------------
-
-        var OriginalMediaFrame = wp.media.view.MediaFrame;
-
-        wp.media.view.MediaFrame = OriginalMediaFrame.extend( {
-            open: function() {
-                OriginalMediaFrame.prototype.open.apply( this, arguments );
-                bindCaptionWatcher( this );
-                bindInsertWarning( this );
-                return this;
+        // Fallback: read alt text input directly from visible modal DOM
+        // Handles cases where Backbone selection is not accessible
+        $( '.media-modal.attachment-details [data-setting="alt"] input,' +
+           '.media-modal.compat-field-alt input,' +
+           '.media-modal input[name="attachments[*][alt]"],' +
+           '.media-modal input[id*="attachment_alt"]'
+        ).each( function() {
+            var altVal = $( this ).val().trim();
+            if ( altVal === '' ) {
+                // Try to get filename from nearby elements
+                var $panel   = $( this ).closest( '.attachment-details,.attachment-info,.compat-attachment-fields' );
+                var filename = $panel.find( '.filename' ).text().trim()
+                            || $panel.find( 'input[name*="[title]"]' ).val()
+                            || 'selected image';
+                missing.push( filename );
             }
         } );
 
-        // Handle frame already open at script load time
-        if ( wp.media.frame ) {
-            bindCaptionWatcher( wp.media.frame );
-            bindInsertWarning( wp.media.frame );
+        return missing;
+    }
+
+    function buildMessage( missing ) {
+        if ( ! missing.length ) { return ''; }
+        if ( missing.length === 1 ) {
+            return ( i18n.singleWarning || '⚠ "%s" has no alt text.' ).replace( '%s', missing[0] );
         }
+        return ( i18n.multiWarning || '⚠ %d images have no alt text.' ).replace( '%d', missing.length );
     }
 
-    // Kick off polling after DOM ready
-    if ( document.readyState === 'loading' ) {
-        document.addEventListener( 'DOMContentLoaded', waitForMedia );
-    } else {
-        waitForMedia();
+    /**
+     * Show warning adjacent to the insert button.
+     * Inserts directly before.media-button-insert since there is
+     * no toolbar wrapper element in this Classic Editor modal structure.
+     */
+    function showWarning( msg ) {
+        clearWarning();
+        $( '<div>' ).addClass( 'uwgs-modal-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).css( {
+                'display':       'inline-block',
+                'vertical-align':'middle',
+                'color':         '#856404',
+                'background':    '#fff3cd',
+                'border':        '1px solid #ffc107',
+                'border-radius': '3px',
+                'font-size':     '12px',
+                'padding':       '5px 8px',
+                'max-width':     '320px',
+                'line-height':   '1.4',
+                'margin-right':  '8px',
+            } ).text( msg ).insertBefore( $( '.media-modal.media-button-insert' ).first() );
     }
 
-} )();
+    function clearWarning() {
+        $( '.uwgs-modal-alt-warning' ).remove();
+    }
+
+    // -----------------------------------------------------------------
+    // CAPTION → ALT AUTO-COPY
+    // Watch caption input fields in the modal DOM directly.
+    // Fires on input/change; copies to alt field if alt is empty.
+    // Uses broad selectors to handle both standard wp.media panels
+    // and ACF-rendered attachment detail panels.
+    // -----------------------------------------------------------------
+
+    var captionSelectors = [
+        '.media-modal [data-setting="caption"] input',
+        '.media-modal [data-setting="caption"] textarea',
+        '.media-modal.compat-field-caption input',
+        '.media-modal.compat-field-caption textarea',
+        '.media-modal input[name*="[caption]"]',
+        '.media-modal textarea[name*="[caption]"]',
+    ].join( ', ' );
+
+    var altSelectors = [
+        '[data-setting="alt"] input',
+        '.compat-field-alt input',
+        'input[name*="[alt]"]',
+        'input[id*="attachment_alt"]',
+    ].join( ', ' );
+
+    $( document ).on( 'input.uwgsCap change.uwgsCap', captionSelectors, function() {
+        var capVal  = $( this ).val().trim();
+        if ( ! capVal ) { return; }
+
+        // Find the alt field in the same attachment panel
+        var $panel    = $( this ).closest(
+            '.attachment-details,.attachment-info,.compat-attachment-fields,.media-sidebar'
+        );
+        var $altField = $panel.length
+            ? $panel.find( altSelectors ).first()
+            : $( '.media-modal' ).find( altSelectors ).first();
+
+        if ( ! $altField.length ) { return; }
+
+        var altVal = $altField.val().trim();
+        if ( altVal === '' ) {
+            $altField.val( capVal ).trigger( 'change' );
+
+            // Also sync to Backbone model if accessible
+            if (
+                typeof wp !== 'undefined' &&
+                wp.media && wp.media.frame
+            ) {
+                try {
+                    var state     = wp.media.frame.state();
+                    var selection = state && state.get( 'selection' );
+                    if ( selection && selection.length === 1 ) {
+                        selection.first().set( 'alt', capVal );
+                    }
+                } catch ( e ) { /* non-fatal */ }
+            }
+        }
+    } );
+
+    // -----------------------------------------------------------------
+    // INSERT BUTTON: WARNING ON CLICK
+    // Delegate on document →.media-button-insert.
+    // Confirmed present in this Classic Editor modal structure.
+    // Does not block insert — soft warning only.
+    // -----------------------------------------------------------------
+
+    $( document ).on( 'click.uwgsInsert', '.media-button-insert', function() {
+        var missing = getMissingAlt();
+
+        if ( ! missing.length ) {
+            clearWarning();
+            return; // All good
+        }
+
+        showWarning( buildMessage( missing ) );
+        // Soft block: do NOT preventDefault — warn but allow insert
+    } );
+
+    // Clear warning when modal closes or selection changes
+    $( document ).on( 'click.uwgsClose', '.media-modal-close', clearWarning );
+
+    // Clear when a different attachment is selected
+    $( document ).on(
+        'click.uwgsClear',
+        '.attachment-preview,.media-menu-item',
+        clearWarning
+    );
+
+} )( jQuery );
 JS;
 
-        wp_add_inline_script( 'jquery', $js, 'after' );
-    }
+    wp_add_inline_script( 'jquery', $js, 'after' );
+}
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
