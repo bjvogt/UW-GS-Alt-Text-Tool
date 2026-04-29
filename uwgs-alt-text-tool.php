@@ -5,10 +5,11 @@
  * Description:       Adds an Alt Text column to the Media Library list view with sortable, filterable,
  *                    and inline-editable alt text. Warns editors when images are missing alt text at
  *                    save/publish time in both classic and block editors, including featured images.
- *                    Copies caption to alt text server-side on attachment save and in the Add Media
- *                    modal. Updates upload status messages to prompt alt text entry. Shows a dashboard
+ *                    Shows persistent in-editor notices when images are missing alt text. Copies
+ *                    caption to alt text server-side on attachment save and in the Add Media modal.
+ *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.0.5
+ * Version:           2.1.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -29,7 +30,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.0.5';
+    const VERSION         = '2.1.0';
 
     public static function init() {
         $instance = new self();
@@ -55,13 +56,13 @@ class UWGS_Alt_Text_Tool {
         // AJAX: inline save
         add_action( 'wp_ajax_uwgs_save_alt_text', array( $this, 'ajax_save_alt_text' ) );
 
-        // AJAX: get attachment alt text by ID (for featured image check)
+        // AJAX: get attachment alt text by ID
         add_action( 'wp_ajax_uwgs_get_attachment_alt', array( $this, 'ajax_get_attachment_alt' ) );
 
         // Flag new image uploads missing alt text
         add_action( 'add_attachment', array( $this, 'flag_new_upload' ) );
 
-        // Server-side: copy caption to alt on attachment edit (images only)
+        // Server-side: copy caption to alt on attachment edit
         add_action( 'edit_attachment', array( $this, 'server_copy_caption_to_alt' ) );
 
         // Dashboard widget
@@ -275,28 +276,16 @@ class UWGS_Alt_Text_Tool {
     // =========================================================================
 
     public function server_copy_caption_to_alt( $post_id ) {
-
         $mime = get_post_mime_type( $post_id );
-        if ( strpos( $mime, 'image/' ) !== 0 ) {
-            return;
-        }
+        if ( strpos( $mime, 'image/' ) !== 0 ) { return; }
 
         $current_alt = get_post_meta( $post_id, self::META_KEY, true );
-        if ( ! empty( $current_alt ) ) {
-            return;
-        }
+        if ( ! empty( $current_alt ) ) { return; }
 
         $caption = get_post_field( 'post_excerpt', $post_id );
-        if ( empty( $caption ) ) {
-            return;
-        }
+        if ( empty( $caption ) ) { return; }
 
-        update_post_meta(
-            $post_id,
-            self::META_KEY,
-            sanitize_text_field( $caption )
-        );
-
+        update_post_meta( $post_id, self::META_KEY, sanitize_text_field( $caption ) );
         delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
     }
 
@@ -352,10 +341,7 @@ class UWGS_Alt_Text_Tool {
             wp_send_json_error( 'Insufficient permissions.' );
         }
 
-        $attachment_id = isset( $_POST['attachment_id'] )
-            ? absint( $_POST['attachment_id'] )
-            : 0;
-
+        $attachment_id = isset( $_POST['attachment_id'] ) ? absint( $_POST['attachment_id'] ) : 0;
         if ( ! $attachment_id ) {
             wp_send_json_error( 'Invalid attachment ID.' );
         }
@@ -375,19 +361,10 @@ class UWGS_Alt_Text_Tool {
 
     // =========================================================================
     // DASHBOARD WIDGET
-    //
-    // Shows total images, images with alt text, images missing alt text,
-    // a visual progress bar, and a direct link to the filtered media library.
-    // Stats are cached in a transient for 12 hours to avoid expensive
-    // queries on every dashboard load. Cache is cleared when alt text
-    // is saved via the inline editor or the edit_attachment hook fires.
     // =========================================================================
 
     public function register_dashboard_widget() {
-        if ( ! current_user_can( 'upload_files' ) ) {
-            return;
-        }
-
+        if ( ! current_user_can( 'upload_files' ) ) { return; }
         wp_add_dashboard_widget(
             'uwgs_alt_text_widget',
             __( 'Image Alt Text Coverage', 'uwgs-alt-text-tool' ),
@@ -395,19 +372,10 @@ class UWGS_Alt_Text_Tool {
         );
     }
 
-    /**
-     * Get alt text coverage stats.
-     * Cached in a transient for 12 hours.
-     * Returns array: [ total, with_alt, missing_alt, new_missing ]
-     */
     private function get_alt_text_stats() {
-
         $cached = get_transient( 'uwgs_alt_text_stats' );
-        if ( false !== $cached ) {
-            return $cached;
-        }
+        if ( false !== $cached ) { return $cached; }
 
-        // Total images in media library
         $total_query = new WP_Query( array(
             'post_type'      => 'attachment',
             'post_mime_type' => 'image',
@@ -418,7 +386,6 @@ class UWGS_Alt_Text_Tool {
         ) );
         $total = (int) $total_query->found_posts;
 
-        // Images missing alt text (meta not exists OR empty string)
         $missing_query = new WP_Query( array(
             'post_type'      => 'attachment',
             'post_mime_type' => 'image',
@@ -428,20 +395,12 @@ class UWGS_Alt_Text_Tool {
             'no_found_rows'  => false,
             'meta_query'     => array(
                 'relation' => 'OR',
-                array(
-                    'key'     => self::META_KEY,
-                    'compare' => 'NOT EXISTS',
-                ),
-                array(
-                    'key'     => self::META_KEY,
-                    'value'   => '',
-                    'compare' => '=',
-                ),
+                array( 'key' => self::META_KEY, 'compare' => 'NOT EXISTS' ),
+                array( 'key' => self::META_KEY, 'value' => '', 'compare' => '=' ),
             ),
         ) );
         $missing = (int) $missing_query->found_posts;
 
-        // Newly uploaded images missing alt text (flagged by our plugin)
         $new_query = new WP_Query( array(
             'post_type'      => 'attachment',
             'post_mime_type' => 'image',
@@ -450,41 +409,26 @@ class UWGS_Alt_Text_Tool {
             'fields'         => 'ids',
             'no_found_rows'  => false,
             'meta_query'     => array(
-                array(
-                    'key'     => self::NEEDS_ALT_KEY,
-                    'value'   => '1',
-                    'compare' => '=',
-                ),
+                array( 'key' => self::NEEDS_ALT_KEY, 'value' => '1', 'compare' => '=' ),
             ),
         ) );
         $new_missing = (int) $new_query->found_posts;
 
-        $with_alt = $total - $missing;
-
         $stats = array(
             'total'       => $total,
-            'with_alt'    => max( 0, $with_alt ),
+            'with_alt'    => max( 0, $total - $missing ),
             'missing'     => $missing,
             'new_missing' => $new_missing,
         );
 
-        // Cache for 12 hours
         set_transient( 'uwgs_alt_text_stats', $stats, 12 * HOUR_IN_SECONDS );
-
         return $stats;
     }
 
-    /**
-     * Clear the stats cache.
-     * Called when alt text is saved or an attachment is edited.
-     */
     public static function clear_stats_cache() {
         delete_transient( 'uwgs_alt_text_stats' );
     }
 
-    /**
-     * Render the dashboard widget HTML.
-     */
     public function render_dashboard_widget() {
 
         $stats       = $this->get_alt_text_stats();
@@ -492,18 +436,8 @@ class UWGS_Alt_Text_Tool {
         $with_alt    = $stats['with_alt'];
         $missing     = $stats['missing'];
         $new_missing = $stats['new_missing'];
-
         $pct         = $total > 0 ? round( ( $with_alt / $total ) * 100 ) : 100;
         $library_url = admin_url( 'upload.php?alt_filter=blank' );
-
-        // Progress bar colour: green ≥80%, amber ≥50%, red <50%
-        if ( $pct >= 80 ) {
-            $bar_color = '#2e7d32';
-        } elseif ( $pct >= 50 ) {
-            $bar_color = '#f57c00';
-        } else {
-            $bar_color = '#c62828';
-        }
 
         ?>
         <div class="uwgs-widget" style="font-size:13px;line-height:1.6;">
@@ -512,10 +446,8 @@ class UWGS_Alt_Text_Tool {
                 <p style="color:#555;margin:0;">
                     <?php esc_html_e( 'No images found in the media library.', 'uwgs-alt-text-tool' ); ?>
                 </p>
-
             <?php else : ?>
 
-                <?php // Progress bar ?>
                 <div style="margin-bottom:12px;">
                     <div style="
                         display:flex;
@@ -523,7 +455,7 @@ class UWGS_Alt_Text_Tool {
                         align-items:baseline;
                         margin-bottom:4px;
                     ">
-                        <span style="font-weight:600;font-size:14px;color:<?php echo esc_attr( $bar_color ); ?>;">
+                        <span style="font-weight:600;font-size:14px;color:#1d2327;">
                             <?php echo esc_html( $pct ); ?>%
                             <?php esc_html_e( 'coverage', 'uwgs-alt-text-tool' ); ?>
                         </span>
@@ -545,13 +477,12 @@ class UWGS_Alt_Text_Tool {
                         aria-valuemin="0"
                         aria-valuemax="100"
                         aria-label="<?php echo esc_attr( sprintf(
-                            /* translators: %d: percentage */
                             __( 'Alt text coverage: %d%%', 'uwgs-alt-text-tool' ),
                             $pct
                         ) ); ?>"
                     >
                         <div style="
-                            background:<?php echo esc_attr( $bar_color ); ?>;
+                            background:#757575;
                             width:<?php echo esc_attr( $pct ); ?>%;
                             height:100%;
                             border-radius:4px;
@@ -560,7 +491,6 @@ class UWGS_Alt_Text_Tool {
                     </div>
                 </div>
 
-                <?php // Stats table ?>
                 <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
                     <tbody>
                         <tr>
@@ -600,13 +530,11 @@ class UWGS_Alt_Text_Tool {
                     </tbody>
                 </table>
 
-                <?php // Action links ?>
                 <?php if ( $missing > 0 ) : ?>
                     <p style="margin:0 0 6px;">
                         <a href="<?php echo esc_url( $library_url ); ?>"
                            class="button button-primary button-small">
                             <?php printf(
-                                /* translators: %s: number of images missing alt text */
                                 esc_html__( 'Fix %s images →', 'uwgs-alt-text-tool' ),
                                 esc_html( number_format_i18n( $missing ) )
                             ); ?>
@@ -627,7 +555,6 @@ class UWGS_Alt_Text_Tool {
                 </p>
 
             <?php endif; ?>
-
         </div>
         <?php
     }
@@ -638,14 +565,12 @@ class UWGS_Alt_Text_Tool {
 
     public function enqueue_admin_assets( $hook ) {
 
-        // Handle manual stats cache refresh
         if (
             isset( $_GET['uwgs_refresh_stats'] ) &&
             '1' === $_GET['uwgs_refresh_stats'] &&
             current_user_can( 'upload_files' )
         ) {
             self::clear_stats_cache();
-            // Redirect to clean URL after clearing
             wp_safe_redirect( remove_query_arg( 'uwgs_refresh_stats' ) );
             exit;
         }
@@ -714,10 +639,7 @@ class UWGS_Alt_Text_Tool {
             ),
         );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsAltData = '. wp_json_encode( $data ). ';'
-        );
+        wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
 
         $js = <<<'JS'
 jQuery( function( $ ) {
@@ -793,8 +715,6 @@ jQuery( function( $ ) {
                     $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
 
                     $feedback.text( i18n.saved || 'Saved.' ).addClass( 'success' );
-
-                    // Clear stats cache so dashboard widget reflects change
                     setTimeout( function() {
                         $feedback.text( '' ).removeClass( 'success' );
                     }, 3000 );
@@ -829,10 +749,7 @@ JS;
             'editPrompt' => __( 'Upload complete — click here to edit and add alt text', 'uwgs-alt-text-tool' ),
         );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsUploadI18n = '. wp_json_encode( $i18n ). ';'
-        );
+        wp_add_inline_script( 'jquery', 'var uwgsUploadI18n = '. wp_json_encode( $i18n ). ';' );
 
         $js = <<<'JS'
 ( function() {
@@ -844,15 +761,12 @@ JS;
 
     function processRow( row ) {
         if ( ! row ) { return; }
-
         var editLink = row.querySelector( 'a[href*="action=edit"]' )
                     || row.querySelector( '.edit-attachment a' )
                     || row.querySelector( '.media-item-info a' );
-
         if ( ! editLink ) { return; }
         if ( editLink.getAttribute( 'data-uwgs-updated' ) ) { return; }
         if ( row.querySelector( '.upload-error' ) ) { return; }
-
         editLink.textContent = promptText;
         editLink.setAttribute( 'data-uwgs-updated', '1' );
         editLink.style.fontWeight = '600';
@@ -862,32 +776,20 @@ JS;
     function observeUploadList() {
         var container = document.getElementById( 'media-items' );
         if ( ! container ) { return; }
-
         var observer = new MutationObserver( function( mutations ) {
             mutations.forEach( function( mutation ) {
-
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
-                    if ( node.id && node.id.indexOf( 'media-item-' ) === 0 ) {
-                        processRow( node );
-                    }
-                    var rows = node.querySelectorAll
-                        ? node.querySelectorAll( '[id^="media-item-"]' )
-                        : [];
+                    if ( node.id && node.id.indexOf( 'media-item-' ) === 0 ) { processRow( node ); }
+                    var rows = node.querySelectorAll ? node.querySelectorAll( '[id^="media-item-"]' ) : [];
                     rows.forEach( processRow );
                 } );
-
-                if (
-                    mutation.type === 'childList' &&
-                    mutation.target &&
-                    mutation.target.closest
-                ) {
+                if ( mutation.type === 'childList' && mutation.target && mutation.target.closest ) {
                     var row = mutation.target.closest( '[id^="media-item-"]' );
                     if ( row ) { processRow( row ); }
                 }
             } );
         } );
-
         observer.observe( container, { childList: true, subtree: true } );
     }
 
@@ -909,9 +811,8 @@ JS;
 
     private function enqueue_attachment_edit_assets( $post_id ) {
 
-        $alt     = get_post_meta( $post_id, self::META_KEY, true );
-        $caption = get_post_field( 'post_excerpt', $post_id );
-
+        $alt         = get_post_meta( $post_id, self::META_KEY, true );
+        $caption     = get_post_field( 'post_excerpt', $post_id );
         $should_copy = ( empty( $alt ) && ! empty( $caption ) );
 
         $css = '.uwgs-attachment-alt-warning {
@@ -930,9 +831,8 @@ JS;
                 border-radius:0 3px 3px 0;
             }.uwgs-caption-copy-notice button {
                 background:none; border:none; padding:0;
-                cursor:pointer; color:#856404;
-                font-size:14px; line-height:1;
-                flex-shrink:0; margin-left:auto;
+                cursor:pointer; color:#856404; font-size:14px;
+                line-height:1; flex-shrink:0; margin-left:auto;
             }.uwgs-caption-copy-notice button:hover { color:#5a4000; }
         ';
 
@@ -952,10 +852,7 @@ JS;
             'captionValue' => $should_copy ? sanitize_text_field( $caption ) : '',
         );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsAttachData = '. wp_json_encode( $data ). ';'
-        );
+        wp_add_inline_script( 'jquery', 'var uwgsAttachData = '. wp_json_encode( $data ). ';' );
 
         $js = <<<'JS'
 jQuery( function( $ ) {
@@ -972,19 +869,10 @@ jQuery( function( $ ) {
     if ( ! $altField.length ) { return; }
 
     if ( shouldCopy && capVal ) {
-
         $altField.val( capVal );
-
         var $notice = $( '<div>' ).addClass( 'uwgs-caption-copy-notice' ).attr( { 'role': 'note', 'aria-live': 'polite' } );
-
-        var $msg = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
-
-        var $dismiss = $( '<button>' ).attr( {
-                'type':       'button',
-                'aria-label': i18n.dismissNotice || 'Dismiss',
-                'title':      i18n.dismissNotice || 'Dismiss',
-            } ).html( '✕' ).on( 'click', function() { $notice.remove(); } );
-
+        var $msg     = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
+        var $dismiss = $( '<button>' ).attr( { 'type': 'button', 'aria-label': i18n.dismissNotice || 'Dismiss', 'title': i18n.dismissNotice || 'Dismiss' } ).html( '✕' ).on( 'click', function() { $notice.remove(); } );
         $notice.append( $msg ).append( $dismiss );
         $altField.after( $notice );
         $altField.one( 'input', function() { $notice.remove(); } );
@@ -1003,10 +891,7 @@ jQuery( function( $ ) {
     } );
 
     $submitBtn.on( 'click', function( e ) {
-        if ( $altField.val().trim().length ) {
-            warned = false;
-            return true;
-        }
+        if ( $altField.val().trim().length ) { warned = false; return true; }
         if ( ! warned ) {
             e.preventDefault();
             warned = true;
@@ -1027,11 +912,46 @@ JS;
 
     // =========================================================================
     // CLASSIC EDITOR + CUSTOM POST TYPES: PRE-SAVE SCAN
+    //
+    // v2.1.0 changes:
+    // - Persistent notice bar below title: shown on page load and after
+    //   media modal closes, updated dynamically
+    // - tinyMCE.triggerSave() used instead of activeEditor.save() to
+    //   handle focus changes and existing content reliably
+    // - All TinyMCE instances checked, not just activeEditor
+    // - saving flag reset on hideWarning() to fix state after featured
+    //   image removal
+    // - Both content and featured image checks always run independently
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
 
         $css = '
+            /* Persistent notice bar */
+            #uwgs-inline-notice {
+                display:none;
+                margin:8px 0 16px;
+                padding:10px 14px;
+                background:#fff3cd;
+                border-left:4px solid #ffc107;
+                color:#856404;
+                font-size:13px;
+                line-height:1.5;
+                border-radius:0 3px 3px 0;
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                gap:12px;
+            }
+            #uwgs-inline-notice.visible { display:flex; }
+            #uwgs-inline-notice.uwgs-notice-text { flex:1; }
+            #uwgs-inline-notice.uwgs-notice-dismiss {
+                background:none; border:none; cursor:pointer;
+                color:#856404; font-size:16px; padding:0; flex-shrink:0;
+            }
+            #uwgs-inline-notice.uwgs-notice-dismiss:hover { color:#5a4000; }
+
+            /* Pre-save warning modal */
             #uwgs-presave-warning {
                 display:none;
                 position:fixed;
@@ -1066,19 +986,20 @@ JS;
             'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
             'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
             'i18n'          => array(
+                'noticeContent'       => __( '⚠ One or more images in this post are missing alt text. Please add descriptions before publishing.', 'uwgs-alt-text-tool' ),
+                'noticeFeatured'      => __( '⚠ The featured image is missing alt text. Please add a description before publishing.', 'uwgs-alt-text-tool' ),
+                'noticeBoth'          => __( '⚠ Images and the featured image in this post are missing alt text. Please add descriptions before publishing.', 'uwgs-alt-text-tool' ),
                 'warningTitle'        => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
                 'warningBodyContent'  => __( 'One or more images in this post are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
                 'warningBodyFeatured' => __( 'The featured image for this post is missing alt text. Please edit the featured image and add a description, or click "Save anyway" if it is decorative.', 'uwgs-alt-text-tool' ),
                 'warningBodyBoth'     => __( 'One or more images and the featured image are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
                 'saveAnyway'          => __( 'Save anyway', 'uwgs-alt-text-tool' ),
                 'goBack'              => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
+                'dismiss'             => __( 'Dismiss', 'uwgs-alt-text-tool' ),
             ),
         );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsPresaveData = '. wp_json_encode( $data ). ';'
-        );
+        wp_add_inline_script( 'jquery', 'var uwgsPresaveData = '. wp_json_encode( $data ). ';' );
 
         $js = <<<'JS'
 ( function() {
@@ -1091,8 +1012,153 @@ JS;
     var i18n    = data.i18n          || {};
 
     var warningEl  = null;
+    var noticeEl   = null;
     var saveTarget = null;
     var saving     = false;
+
+    // -----------------------------------------------------------------
+    // CONTENT SCAN
+    // Uses tinyMCE.triggerSave() to flush ALL editor instances to their
+    // textareas before reading — handles focus changes and existing posts.
+    // Falls back to reading #content textarea directly.
+    // -----------------------------------------------------------------
+
+    function getPostContent() {
+        // Flush all TinyMCE instances to their textareas
+        if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
+            try { tinyMCE.triggerSave(); } catch(e) {}
+        }
+        // Read from textarea — always populated after triggerSave()
+        var textarea = document.getElementById( 'content' );
+        return textarea ? textarea.value : '';
+    }
+
+    function contentHasMissingAlt() {
+        var content = getPostContent();
+        if ( ! content ) { return false; }
+        var tmp = document.createElement( 'div' );
+        tmp.innerHTML = content;
+        var imgs = tmp.querySelectorAll( 'img' );
+        for ( var i = 0; i < imgs.length; i++ ) {
+            if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // -----------------------------------------------------------------
+    // FEATURED IMAGE CHECK
+    // -----------------------------------------------------------------
+
+    function getFeaturedImageId() {
+        var el = document.getElementById( '_thumbnail_id' );
+        if ( el ) {
+            var val = parseInt( el.value, 10 );
+            if ( val && val > 0 ) { return val; }
+        }
+        var candidates = document.querySelectorAll(
+            'input[type="hidden"][name*="thumbnail_id"],' +
+            'input[type="hidden"][id*="thumbnail_id"],' +
+            'input[type="hidden"][name*="featured_image"],' +
+            'input[type="hidden"][id*="featured_image"],' +
+            'input[type="hidden"][name*="featured_media"],' +
+            'input[type="hidden"][id*="featured_media"]'
+        );
+        for ( var i = 0; i < candidates.length; i++ ) {
+            var id = parseInt( candidates[i].value, 10 );
+            if ( id && id > 0 ) { return id; }
+        }
+        return 0;
+    }
+
+    function featuredImageMissingAlt() {
+        return new Promise( function( resolve ) {
+            var thumbnailId = getFeaturedImageId();
+            if ( ! thumbnailId ) { resolve( false ); return; }
+            var formData = new FormData();
+            formData.append( 'action',        'uwgs_get_attachment_alt' );
+            formData.append( 'nonce',         nonce );
+            formData.append( 'attachment_id', thumbnailId );
+            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
+                    resolve( response.success && ! response.data.has_alt );
+                } ).catch( function() { resolve( false ); } );
+        } );
+    }
+
+    // -----------------------------------------------------------------
+    // PERSISTENT INLINE NOTICE BAR
+    // Shown below #titlediv when images are missing alt text.
+    // Updated on page load (after TinyMCE ready) and after media insert.
+    // -----------------------------------------------------------------
+
+    function buildNoticeBar() {
+        noticeEl = document.createElement( 'div' );
+        noticeEl.id = 'uwgs-inline-notice';
+        noticeEl.setAttribute( 'role',     'status' );
+        noticeEl.setAttribute( 'aria-live','polite' );
+
+        var textSpan = document.createElement( 'span' );
+        textSpan.className = 'uwgs-notice-text';
+        noticeEl.appendChild( textSpan );
+
+        var dismissBtn = document.createElement( 'button' );
+        dismissBtn.type      = 'button';
+        dismissBtn.className = 'uwgs-notice-dismiss';
+        dismissBtn.setAttribute( 'aria-label', i18n.dismiss || 'Dismiss' );
+        dismissBtn.textContent = '✕';
+        dismissBtn.addEventListener( 'click', function() {
+            noticeEl.classList.remove( 'visible' );
+        } );
+        noticeEl.appendChild( dismissBtn );
+
+        // Insert after #titlediv if present, otherwise after #post-body-content
+        var anchor = document.getElementById( 'titlediv' )
+                  || document.getElementById( 'post-body-content' );
+        if ( anchor && anchor.parentNode ) {
+            anchor.parentNode.insertBefore( noticeEl, anchor.nextSibling );
+        } else {
+            document.body.appendChild( noticeEl );
+        }
+    }
+
+    function updateNoticeBar( hasContent, hasFeatured ) {
+        if ( ! noticeEl ) { return; }
+        var textSpan = noticeEl.querySelector( '.uwgs-notice-text' );
+        if ( ! textSpan ) { return; }
+
+        if ( ! hasContent && ! hasFeatured ) {
+            noticeEl.classList.remove( 'visible' );
+            return;
+        }
+
+        var msg;
+        if ( hasContent && hasFeatured ) {
+            msg = i18n.noticeBoth     || '⚠ Images and the featured image are missing alt text.';
+        } else if ( hasFeatured ) {
+            msg = i18n.noticeFeatured || '⚠ The featured image is missing alt text.';
+        } else {
+            msg = i18n.noticeContent  || '⚠ One or more images are missing alt text.';
+        }
+
+        textSpan.textContent = msg;
+        noticeEl.classList.add( 'visible' );
+    }
+
+    /**
+     * Run both checks and update the notice bar.
+     * Called on page load (after TinyMCE ready) and after media modal closes.
+     */
+    function refreshNoticeBar() {
+        var hasContent = contentHasMissingAlt();
+        featuredImageMissingAlt().then( function( hasFeatured ) {
+            updateNoticeBar( hasContent, hasFeatured );
+        } );
+    }
+
+    // -----------------------------------------------------------------
+    // PRE-SAVE WARNING MODAL
+    // -----------------------------------------------------------------
 
     function buildWarningPanel() {
         warningEl = document.createElement( 'div' );
@@ -1148,7 +1214,6 @@ JS;
 
         actions.appendChild( goBack );
         actions.appendChild( saveAnyway );
-
         warningEl.appendChild( title );
         warningEl.appendChild( body );
         warningEl.appendChild( actions );
@@ -1160,79 +1225,14 @@ JS;
         warningEl.classList.remove( 'visible' );
         warningEl.innerHTML = '';
         saveTarget = null;
+        saving = false; // always reset on hide
     }
 
-    function contentHasMissingAlt() {
-        var content = '';
-
-        if (
-            typeof window.tinyMCE !== 'undefined' &&
-            tinyMCE.activeEditor &&
-            ! tinyMCE.activeEditor.isHidden()
-        ) {
-            tinyMCE.activeEditor.save();
-            content = tinyMCE.activeEditor.getContent();
-        } else {
-            var textarea = document.getElementById( 'content' );
-            content = textarea ? textarea.value : '';
-        }
-
-        if ( ! content ) { return false; }
-
-        var tmp = document.createElement( 'div' );
-        tmp.innerHTML = content;
-
-        var imgs = tmp.querySelectorAll( 'img' );
-        for ( var i = 0; i < imgs.length; i++ ) {
-            if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function getFeaturedImageId() {
-        var el = document.getElementById( '_thumbnail_id' );
-        if ( el ) {
-            var val = parseInt( el.value, 10 );
-            if ( val && val > 0 ) { return val; }
-        }
-
-        var candidates = document.querySelectorAll(
-            'input[type="hidden"][name*="thumbnail_id"],' +
-            'input[type="hidden"][id*="thumbnail_id"],' +
-            'input[type="hidden"][name*="featured_image"],' +
-            'input[type="hidden"][id*="featured_image"],' +
-            'input[type="hidden"][name*="featured_media"],' +
-            'input[type="hidden"][id*="featured_media"]'
-        );
-
-        for ( var i = 0; i < candidates.length; i++ ) {
-            var id = parseInt( candidates[i].value, 10 );
-            if ( id && id > 0 ) { return id; }
-        }
-
-        return 0;
-    }
-
-    function featuredImageMissingAlt() {
-        return new Promise( function( resolve ) {
-            var thumbnailId = getFeaturedImageId();
-            if ( ! thumbnailId ) {
-                resolve( false );
-                return;
-            }
-
-            var formData = new FormData();
-            formData.append( 'action',        'uwgs_get_attachment_alt' );
-            formData.append( 'nonce',         nonce );
-            formData.append( 'attachment_id', thumbnailId );
-
-            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
-                    resolve( response.success && ! response.data.has_alt );
-                } ).catch( function() { resolve( false ); } );
-        } );
-    }
+    // -----------------------------------------------------------------
+    // SAVE BUTTON INTERCEPT
+    // Capture phase — fires before all other handlers.
+    // Both checks always run independently.
+    // -----------------------------------------------------------------
 
     function interceptSaveButtons() {
         var saveIds = [ 'save', 'save-post', 'publish' ];
@@ -1257,42 +1257,113 @@ JS;
 
                 saveTarget = btn;
 
+                // Run both checks independently and in parallel
                 var hasContent = contentHasMissingAlt();
 
-                if ( hasContent ) {
-                    featuredImageMissingAlt().then( function( hasFeatured ) {
-                        showWarning( true, hasFeatured );
-                    } );
-                    return;
-                }
-
                 featuredImageMissingAlt().then( function( hasFeatured ) {
-                    if ( hasFeatured ) {
-                        showWarning( false, true );
+                    if ( hasContent || hasFeatured ) {
+                        showWarning( hasContent, hasFeatured );
                     } else {
                         saving = true;
                         btn.click();
                     }
                 } );
 
-            }, true );
+            }, true ); // capture phase
         } );
     }
 
+    // -----------------------------------------------------------------
+    // WATCH FOR MEDIA MODAL CLOSE — re-scan after insert
+    // Detects modal close via MutationObserver on document.body,
+    // watching for.media-modal to be removed from the DOM.
+    // -----------------------------------------------------------------
+
+    function watchForModalClose() {
+        var modalObserver = new MutationObserver( function( mutations ) {
+            mutations.forEach( function( mutation ) {
+                mutation.removedNodes.forEach( function( node ) {
+                    if (
+                        node.nodeType === 1 &&
+                        node.classList &&
+                        node.classList.contains( 'media-modal' )
+                    ) {
+                        // Modal just closed — wait briefly for TinyMCE
+                        // to process the newly inserted content
+                        setTimeout( refreshNoticeBar, 400 );
+                    }
+                } );
+            } );
+        } );
+
+        modalObserver.observe( document.body, { childList: true } );
+    }
+
+    // -----------------------------------------------------------------
+    // WAIT FOR TINYMCE THEN DO INITIAL SCAN
+    // Polls until TinyMCE is initialized (max 10 seconds).
+    // -----------------------------------------------------------------
+
+    function waitForTinyMCEThenScan() {
+        var attempts    = 0;
+        var maxAttempts = 100; // 100 × 100ms = 10 seconds
+
+        function attempt() {
+            attempts++;
+
+            var tinyReady = (
+                typeof window.tinyMCE !== 'undefined' &&
+                tinyMCE.editors &&
+                tinyMCE.editors.length > 0 &&
+                tinyMCE.editors[0].initialized
+            );
+
+            if ( tinyReady ) {
+                // Give TinyMCE one more tick to fully render content
+                setTimeout( refreshNoticeBar, 200 );
+                return;
+            }
+
+            // TinyMCE not ready yet — but still scan textarea in case
+            // this is a text-tab-only session or TinyMCE is disabled
+            if ( attempts === 1 ) {
+                // Immediate scan of textarea on first attempt
+                var hasContent = contentHasMissingAlt();
+                featuredImageMissingAlt().then( function( hasFeatured ) {
+                    updateNoticeBar( hasContent, hasFeatured );
+                } );
+            }
+
+            if ( attempts < maxAttempts ) {
+                setTimeout( attempt, 100 );
+            }
+        }
+
+        attempt();
+    }
+
+    // Dismiss warning on Escape
     document.addEventListener( 'keydown', function( e ) {
         if ( e.key === 'Escape' && warningEl && warningEl.classList.contains( 'visible' ) ) {
             hideWarning();
         }
     } );
 
+    // Init
     if ( document.readyState === 'loading' ) {
         document.addEventListener( 'DOMContentLoaded', function() {
+            buildNoticeBar();
             buildWarningPanel();
             interceptSaveButtons();
+            watchForModalClose();
+            waitForTinyMCEThenScan();
         } );
     } else {
+        buildNoticeBar();
         buildWarningPanel();
         interceptSaveButtons();
+        watchForModalClose();
+        waitForTinyMCEThenScan();
     }
 
 } )();
@@ -1311,10 +1382,7 @@ JS;
             'captionCopied' => __( 'Copied from caption — please review before inserting.', 'uwgs-alt-text-tool' ),
         );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';'
-        );
+        wp_add_inline_script( 'jquery', 'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';' );
 
         $js = <<<'JS'
 ( function() {
@@ -1347,7 +1415,6 @@ JS;
 
         altField.setAttribute( 'data-uwgs-cap-applied', '1' );
         altField.value = capVal;
-
         altField.dispatchEvent( new Event( 'change', { bubbles: true } ) );
         altField.dispatchEvent( new Event( 'input',  { bubbles: true } ) );
 
@@ -1358,36 +1425,20 @@ JS;
         notice.className = 'uwgs-modal-cap-notice';
         notice.setAttribute( 'role', 'note' );
         notice.style.cssText = [
-            'margin-top:4px',
-            'padding:5px 8px',
-            'background:#fff3cd',
-            'border-left:3px solid #ffc107',
-            'color:#856404',
-            'font-size:11px',
-            'line-height:1.4',
-            'border-radius:0 2px 2px 0',
-            'display:flex',
-            'align-items:center',
-            'justify-content:space-between',
-            'gap:6px',
+            'margin-top:4px', 'padding:5px 8px', 'background:#fff3cd',
+            'border-left:3px solid #ffc107', 'color:#856404', 'font-size:11px',
+            'line-height:1.4', 'border-radius:0 2px 2px 0', 'display:flex',
+            'align-items:center', 'justify-content:space-between', 'gap:6px',
         ].join( ';' );
 
         var msg = document.createElement( 'span' );
         msg.textContent = i18n.captionCopied || 'Copied from caption — please review before inserting.';
 
         var dismiss = document.createElement( 'button' );
-        dismiss.type        = 'button';
+        dismiss.type = 'button';
         dismiss.textContent = '✕';
         dismiss.setAttribute( 'aria-label', 'Dismiss' );
-        dismiss.style.cssText = [
-            'background:none',
-            'border:none',
-            'cursor:pointer',
-            'color:#856404',
-            'font-size:12px',
-            'padding:0',
-            'flex-shrink:0',
-        ].join( ';' );
+        dismiss.style.cssText = 'background:none;border:none;cursor:pointer;color:#856404;font-size:12px;padding:0;flex-shrink:0;';
         dismiss.addEventListener( 'click', function() { notice.remove(); } );
 
         notice.appendChild( msg );
@@ -1408,23 +1459,18 @@ JS;
 
     function processPanels( container ) {
         if ( ! container ) { return; }
-        var panels = container.querySelectorAll(
-            '.attachment-details.save-ready,.attachment-details'
-        );
-        panels.forEach( function( panel ) {
-            setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
-        } );
+        container.querySelectorAll( '.attachment-details.save-ready,.attachment-details' ).forEach( function( panel ) {
+                setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
+            } );
     }
 
     function observeModalContent( modal ) {
         if ( ! modal || modal._uwgsObserved ) { return; }
         modal._uwgsObserved = true;
-
         processPanels( modal );
 
         var observer = new MutationObserver( function( mutations ) {
             mutations.forEach( function( mutation ) {
-
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
                     if ( node.classList && node.classList.contains( 'attachment-details' ) ) {
@@ -1433,14 +1479,9 @@ JS;
                     }
                     processPanels( node );
                 } );
-
                 if ( mutation.type === 'childList' && mutation.target ) {
-                    var panel = mutation.target.closest
-                        ? mutation.target.closest( '.attachment-details' )
-                        : null;
-                    if ( panel ) {
-                        setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
-                    }
+                    var panel = mutation.target.closest ? mutation.target.closest( '.attachment-details' ) : null;
+                    if ( panel ) { setTimeout( function() { applyCaptionToAlt( panel ); }, 200 ); }
                 }
             } );
         } );
@@ -1455,12 +1496,7 @@ JS;
             mutations.forEach( function( mutation ) {
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
-                    if (
-                        node.classList && (
-                            node.classList.contains( 'media-modal' ) ||
-                            node.classList.contains( 'media-frame' )
-                        )
-                    ) {
+                    if ( node.classList && ( node.classList.contains( 'media-modal' ) || node.classList.contains( 'media-frame' ) ) ) {
                         observeModalContent( node );
                         return;
                     }
@@ -1489,9 +1525,7 @@ JS;
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
-        if ( ! current_user_can( 'upload_files' ) ) {
-            return;
-        }
+        if ( ! current_user_can( 'upload_files' ) ) { return; }
 
         $i18n = array(
             'panelTitle'      => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
@@ -1503,10 +1537,7 @@ JS;
             'canvasBanner'    => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
         );
 
-        wp_add_inline_script(
-            'wp-blocks',
-            'var uwgsGutenbergI18n = '. wp_json_encode( $i18n ). ';'
-        );
+        wp_add_inline_script( 'wp-blocks', 'var uwgsGutenbergI18n = '. wp_json_encode( $i18n ). ';' );
 
         $js = <<<'JS'
 ( function( wp, i18n ) {
@@ -1528,7 +1559,10 @@ JS;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
 
-    // Block canvas warning HOC
+    // -----------------------------------------------------------------
+    // BLOCK CANVAS WARNING HOC
+    // -----------------------------------------------------------------
+
     if ( addFilter && createHOC ) {
 
         var withAltWarning = createHOC( function( BlockEdit ) {
@@ -1544,53 +1578,42 @@ JS;
                 var hasAlt   = alt.trim() !== '';
 
                 var bannerStyle = {
-                    display:      'flex',
-                    alignItems:   'center',
-                    gap:          '8px',
-                    margin:       '4px 0 0',
-                    padding:      '8px 12px',
-                    background:   '#fff3cd',
-                    borderLeft:   '4px solid #ffc107',
-                    color:        '#856404',
-                    fontSize:     '13px',
-                    lineHeight:   '1.5',
+                    display: 'flex', alignItems: 'center', gap: '8px',
+                    margin: '4px 0 0', padding: '8px 12px',
+                    background: '#fff3cd', borderLeft: '4px solid #ffc107',
+                    color: '#856404', fontSize: '13px', lineHeight: '1.5',
                     borderRadius: '0 3px 3px 0',
                 };
 
                 return el(
-                    Fragment,
-                    null,
+                    Fragment, null,
                     el( BlockEdit, props ),
                     ( hasImage && ! hasAlt )
                         ? el( 'div', {
-                                style:       bannerStyle,
-                                role:        'alert',
-                                'aria-live': 'polite',
-                                className:   'uwgs-block-alt-warning',
+                                style: bannerStyle, role: 'alert',
+                                'aria-live': 'polite', className: 'uwgs-block-alt-warning',
                             },
                             el( 'span', { 'aria-hidden': 'true' }, '⚠' ),
-                            el( 'span', null,
-                                i18n.canvasBanner || 'Missing alt text — add it in the sidebar.'
-                            )
+                            el( 'span', null, i18n.canvasBanner || 'Missing alt text — add it in the sidebar.' )
                           )
                         : null
                 );
             };
         }, 'withAltWarning' );
 
-        addFilter(
-            'editor.BlockEdit',
-            'uwgs-alt-text-tool/with-alt-warning',
-            withAltWarning
-        );
+        addFilter( 'editor.BlockEdit', 'uwgs-alt-text-tool/with-alt-warning', withAltWarning );
     }
+
+    // -----------------------------------------------------------------
+    // PRE-PUBLISH PANEL
+    // -----------------------------------------------------------------
 
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
-            var block = blocks[ i ];
+            var block = blocks[i];
             if ( block.name === 'core/image' ) {
                 var alt = ( block.attributes && block.attributes.alt )
                     ? block.attributes.alt.trim() : '';
@@ -1605,7 +1628,7 @@ JS;
 
     function UWGSAltTextPanel() {
 
-        // Independent useSelect calls — each reacts to its own store slice
+        // Each useSelect call reacts independently to its store slice
         var contentMissing = useSelect( function( select ) {
             var blocks = select( 'core/block-editor' ).getBlocks();
             return hasImageBlocksMissingAlt( blocks );
@@ -1615,7 +1638,7 @@ JS;
             var featuredId = select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
             if ( ! featuredId || featuredId < 1 ) { return false; }
             var media = select( 'core' ).getMedia( featuredId, { context: 'edit' } );
-            if ( ! media ) { return false; } // still loading
+            if ( ! media ) { return false; }
             return ( media.alt_text || '' ).trim() === '';
         } );
 
@@ -1640,26 +1663,12 @@ JS;
             },
             hasIssues
                 ? el( Fragment, null,
-                    el( 'p', {
-                        style: {
-                            margin:     '0 0 10px',
-                            color:      '#856404',
-                            fontSize:   '13px',
-                            lineHeight: '1.6',
-                        }
-                    }, message ),
-                    el( 'p', {
-                        style: {
-                            margin:    '0',
-                            fontSize:  '12px',
-                            color:     '#555',
-                            fontStyle: 'italic',
-                        }
-                    }, i18n.decorativeNote || 'If an image is decorative, mark it as decorative in block settings.' )
+                    el( 'p', { style: { margin: '0 0 10px', color: '#856404', fontSize: '13px', lineHeight: '1.6' } }, message ),
+                    el( 'p', { style: { margin: '0', fontSize: '12px', color: '#555', fontStyle: 'italic' } },
+                        i18n.decorativeNote || 'If an image is decorative, mark it as decorative in block settings.' )
                   )
-                : el( 'p', {
-                    style: { margin:'0', color:'#2e7d32', fontSize:'13px' }
-                }, i18n.allGood || '✓ All images in this post have alt text.' )
+                : el( 'p', { style: { margin: '0', color: '#2e7d32', fontSize: '13px' } },
+                    i18n.allGood || '✓ All images in this post have alt text.' )
         );
     }
 
@@ -1675,7 +1684,7 @@ JS;
     }
 }
 
-// Clear stats cache when alt text is saved via AJAX or attachment is edited
+// Clear stats cache when alt text changes
 add_action( 'wp_ajax_uwgs_save_alt_text', array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ), 1 );
 add_action( 'edit_attachment',            array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ) );
 add_action( 'add_attachment',             array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ) );
