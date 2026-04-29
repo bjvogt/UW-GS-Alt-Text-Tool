@@ -296,46 +296,6 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
-    // AJAX: GET ATTACHMENT ALT TEXT
-    // Used by classic editor featured image check at save time.
-    // =========================================================================
-
-    public function ajax_get_attachment_alt() {
-
-        // Verify nonce
-        if ( ! isset( $_POST['nonce'] )
-             || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ALT_CHECK ) ) {
-            wp_send_json_error( 'Security check failed.' );
-        }
-
-        // Capability check
-        if ( ! current_user_can( 'edit_posts' ) ) {
-            wp_send_json_error( 'Insufficient permissions.' );
-        }
-
-        $attachment_id = isset( $_POST['attachment_id'] )
-            ? absint( $_POST['attachment_id'] )
-            : 0;
-
-        if ( ! $attachment_id ) {
-            wp_send_json_error( 'Invalid attachment ID.' );
-        }
-
-        // Confirm it's an attachment
-        if ( 'attachment' !== get_post_type( $attachment_id ) ) {
-            wp_send_json_error( 'Not an attachment.' );
-        }
-
-        $alt = get_post_meta( $attachment_id, self::META_KEY, true );
-
-        wp_send_json_success( array(
-            'alt'           => $alt,
-            'has_alt'       => ! empty( $alt ),
-            'attachment_id' => $attachment_id,
-        ) );
-    }
-
-    // =========================================================================
     // ADMIN ASSETS
     // =========================================================================
 
