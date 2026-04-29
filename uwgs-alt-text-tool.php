@@ -7,7 +7,7 @@
  *                    save/publish time in both classic and block editors. Copies caption to alt text
  *                    with notice on attachment edit screen and in the Add Media modal. Updates upload
  *                    status messages to prompt alt text entry. Built for UW Graduate School.
- * Version:           1.7.0
+ * Version:           1.8.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
