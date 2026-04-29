@@ -9,7 +9,7 @@
  *                    caption to alt text server-side on attachment save and in the Add Media modal.
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.1.4
+ * Version:           2.2.1
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
