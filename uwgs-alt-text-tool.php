@@ -9,7 +9,7 @@
  *                    caption to alt text server-side on attachment save and in the Add Media modal.
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.2.0
+ * Version:           2.1.4
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -30,7 +30,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.2.0';
+    const VERSION         = '2.1.3';
 
     public static function init() {
         $instance = new self();
@@ -535,6 +535,9 @@ class UWGS_Alt_Text_Tool {
                 $this->enqueue_attachment_edit_assets( $post->ID );
             }
 
+            // All non-block-editor post types get the same presave treatment —
+            // including uw_stories. The inline notice bar gracefully falls back
+            // to document.body if #titlediv is absent.
             if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
                 $this->enqueue_classic_presave_assets();
             }
@@ -566,9 +569,7 @@ class UWGS_Alt_Text_Tool {
         wp_enqueue_style( 'uwgs-alt-text-tool' );
         wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        // Build per-attachment suggestion data.
-        // Uses get_post_field('post_title') — raw unfiltered value, no HTML
-        // entities from apply_filters('the_title'). Sanitization happens JS-side.
+        // Build per-attachment suggestion data: caption first, then filename
         $suggestions = array();
         global $wp_query;
         if ( $wp_query && ! empty( $wp_query->posts ) ) {
@@ -579,8 +580,7 @@ class UWGS_Alt_Text_Tool {
                 $alt = get_post_meta( $post_id, self::META_KEY, true );
                 if ( ! empty( $alt ) ) { continue; }
                 $caption  = get_post_field( 'post_excerpt', $post_id );
-                // Raw post_title — avoids HTML entity encoding from get_the_title()
-                $filename = get_post_field( 'post_title', $post_id );
+                $filename = get_the_title( $post_id );
                 if ( ! empty( trim( $caption ) ) ) {
                     $suggestions[ $post_id ] = array(
                         'type'  => 'caption',
@@ -618,50 +618,31 @@ jQuery( function( $ ) {
     var suggestions = data.suggestions || {};
     var i18n        = data.i18n        || {};
 
-    // -----------------------------------------------------------------
-    // FILENAME SANITIZATION
-    // Step 0: decode ALL HTML entities to a space — handles &#8211; (–),
-    // &#215; (×), &amp; etc. without needing to enumerate each one.
-    // Remaining steps clean up the decoded plain text.
-    // -----------------------------------------------------------------
-
     function sanitizeFilename( raw ) {
         var s = raw;
-
-        // 0. Decode any HTML entities to a space
-        //    Catches &#8211; &#215; &times; &amp;   etc.
-        s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
-
-        // 1. Strip file extension
+        // 1. Strip extension
         s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
-
-        // 2. Replace hyphens and underscores with spaces
+        // 2. Replace HTML entities for multiplication sign (&#215; or &times;)
+        //    before other processing so NNNxNNN patterns are caught
+        s = s.replace( /&#215;|&times;/gi, 'x' );
+        // 3. Replace hyphens and underscores with spaces
         s = s.replace( /[-_]+/g, ' ' );
-
-        // 3. Remove WP thumbnail size patterns: NNNxNNN
+        // 4. Remove WP thumbnail size patterns: NNNxNNN (plain x or entity-replaced)
         s = s.replace( /\b\d+x\d+\b/gi, '' );
-
-        // 4. Remove 8-digit date patterns (YYYYMMDD: 19xxxxxx or 20xxxxxx)
+        // 5. Remove 8-digit date patterns (YYYYMMDD: 19xxxxxx or 20xxxxxx)
         s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-
-        // 5. Remove standalone 4-digit years (1900-2099) only when NOT
-        //    immediately followed by alphanumeric (preserves 2026uw3mt etc.)
+        // 6. Remove standalone 4-digit years (1900-2099) only when NOT
+        //    immediately followed by letters (avoids stripping 2026 from 2026uw3mt)
         s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
-
-        // 6. Remove 'scaled' (WP large image suffix)
+        // 7. Remove 'scaled' (WP large image suffix)
         s = s.replace( /\bscaled\b/gi, '' );
-
-        // 7. Remove isolated 1-2 digit numbers (size variants like -5-, -2-)
-        //    Preserves longer reference numbers (088, 156 etc.)
+        // 8. Remove isolated 1-2 digit numbers (size variants)
+        //    but preserve longer reference numbers
         s = s.replace( /\b\d{1,2}\b/g, '' );
-
-        // 8. Collapse multiple spaces and trim
+        // 9. Collapse multiple spaces and trim
         s = s.replace( /\s{2,}/g, ' ' ).trim();
-
-        // 9. Title case — only capitalize words starting with a letter
-        //    (leaves reference codes like 2026uw3mt unchanged)
-        s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
-
+        // 10. Title case
+        s = s.replace( /\b\w/g, function( c ) { return c.toUpperCase(); } );
         return s;
     }
 
@@ -930,6 +911,11 @@ JS;
 
     // =========================================================================
     // CLASSIC EDITOR + ALL NON-BLOCK-EDITOR POST TYPES: PRE-SAVE SCAN
+    //
+    // Applies to: posts, pages, custom post types including uw_stories.
+    // The inline notice bar anchors to #titlediv if present; falls back
+    // to document.body if absent (e.g. uw_stories has no #titlediv).
+    // The popup warning works regardless of post type DOM structure.
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -1014,38 +1000,55 @@ JS;
 
     // -----------------------------------------------------------------
     // CONTENT SCAN
-    // Reads from every TinyMCE instance directly — covers standard
-    // classic editor AND ACF iframe editors (e.g. uw_stories).
-    // Also reads #content textarea as fallback.
+    // Uses tinyMCE.triggerSave() to flush all editors before reading.
+    // Falls back to textarea for non-TinyMCE contexts (uw_stories etc).
     // -----------------------------------------------------------------
+
+    function getPostContent() {
+        // Flush all TinyMCE instances to their respective textareas
+        if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
+            try { tinyMCE.triggerSave(); } catch(e) {}
+        }
+        // Return standard #content textarea value for standard editors
+        var textarea = document.getElementById( 'content' );
+        return textarea ? textarea.value : '';
+    }
 
     function contentHasMissingAlt() {
         var allContent = [];
 
         if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
+            // Read directly from every TinyMCE instance — covers both standard
+            // #content editors AND ACF iframe editors (data-id="acf-editor-*")
             tinyMCE.editors.forEach( function( editor ) {
                 if ( editor && editor.getContent ) {
-                    try { allContent.push( editor.getContent() ); } catch(e) {}
+                    try {
+                        allContent.push( editor.getContent() );
+                    } catch(e) {}
                 }
             } );
         }
 
+        // Also read #content textarea as fallback (standard classic editor)
         var textarea = document.getElementById( 'content' );
         if ( textarea && textarea.value ) {
             allContent.push( textarea.value );
         }
 
+        // If nothing found anywhere, nothing to scan
         if ( ! allContent.length ) { return false; }
 
+        // Scan all collected content for images missing alt text
         for ( var c = 0; c < allContent.length; c++ ) {
             if ( ! allContent[c] ) { continue; }
             var tmp = document.createElement( 'div' );
             tmp.innerHTML = allContent[c];
             var imgs = tmp.querySelectorAll( 'img' );
             for ( var i = 0; i < imgs.length; i++ ) {
-                // Skip TinyMCE UI chrome elements
+                var alt = ( imgs[i].getAttribute( 'alt' ) || '' ).trim();
+                // Skip TinyMCE UI elements (resize handles etc)
                 if ( imgs[i].getAttribute( 'data-mce-bogus' ) ) { continue; }
-                if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) { return true; }
+                if ( alt === '' ) { return true; }
             }
         }
 
@@ -1091,6 +1094,10 @@ JS;
 
     // -----------------------------------------------------------------
     // INLINE NOTICE BAR
+    // Anchors to #titlediv if present (standard posts/pages).
+    // Falls back to document.body for post types without #titlediv
+    // (e.g. uw_stories) — appended to body, harmless if not visible.
+    // Stays dismissed until new media inserted or all issues resolved.
     // -----------------------------------------------------------------
 
     function buildNoticeBar() {
@@ -1114,6 +1121,7 @@ JS;
         } );
         noticeEl.appendChild( dismissBtn );
 
+        // Anchor: prefer #titlediv (standard WP), fall back to body
         var anchor = document.getElementById( 'titlediv' )
                   || document.getElementById( 'post-body-content' );
         if ( anchor && anchor.parentNode ) {
@@ -1230,6 +1238,8 @@ JS;
 
     // -----------------------------------------------------------------
     // SAVE BUTTON INTERCEPT — capture phase
+    // Runs both content scan (sync) and featured image check (async)
+    // in parallel. Neither can suppress the other.
     // -----------------------------------------------------------------
 
     function interceptSaveButtons() {
@@ -1257,12 +1267,12 @@ JS;
                     }
                 } );
 
-            }, true );
+            }, true ); // capture phase — fires before all other handlers
         } );
     }
 
     // -----------------------------------------------------------------
-    // WATCH FOR MEDIA MODAL CLOSE
+    // WATCH FOR MEDIA MODAL CLOSE — re-scan after insert
     // -----------------------------------------------------------------
 
     function watchForModalClose() {
@@ -1283,8 +1293,7 @@ JS;
     }
 
     // -----------------------------------------------------------------
-    // INITIAL SCAN — waits for TinyMCE if present, scans immediately
-    // if not (covers uw_stories ACF iframe editors and standard editors)
+    // WAIT FOR TINYMCE THEN INITIAL SCAN
     // -----------------------------------------------------------------
 
     function waitForTinyMCEThenScan() {
@@ -1305,7 +1314,9 @@ JS;
                 return;
             }
 
+            // Immediate textarea scan on first attempt
             if ( attempts === 1 ) { refreshNoticeBar( false ); }
+
             if ( attempts < maxAttempts ) { setTimeout( attempt, 100 ); }
         }
 
@@ -1487,12 +1498,9 @@ JS;
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
     //
-    // v2.2.0: Removed wp.data.subscribe approach (caused post vs page
-    // inconsistency). Reverted to clean reactive useSelect pattern.
-    // Panel uses initialOpen driven by fresh useSelect on every render.
-    // Both content and featured image checks are independent useSelect
-    // calls with no dependency array — re-evaluate on every render,
-    // ensuring the panel always reflects current state when opened.
+    // Fix in v2.1.3: added wp.data.subscribe to force the pre-publish
+    // panel to re-evaluate and open when issues are detected at publish
+    // time, regardless of whether the panel was previously mounted.
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1527,6 +1535,8 @@ JS;
         : ( wp.editPost ? wp.editPost.PluginPrePublishPanel : null );
 
     var useSelect = wp.data    ? wp.data.useSelect                     : null;
+    var subscribe = wp.data    ? wp.data.subscribe                     : null;
+    var dispatch  = wp.data    ? wp.data.dispatch                      : null;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
 
@@ -1572,6 +1582,10 @@ JS;
 
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
+    // -----------------------------------------------------------------
+    // HELPER: check blocks recursively for missing alt text
+    // -----------------------------------------------------------------
+
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
@@ -1588,10 +1602,67 @@ JS;
         return false;
     }
 
+    // -----------------------------------------------------------------
+    // SUBSCRIBE: when the pre-publish panel opens, force it to show
+    // the correct open state by dispatching an editPost action.
+    //
+    // wp.data.subscribe fires on every store change. We watch for the
+    // pre-publish panel becoming active (isPublishSidebarOpened) and
+    // if we have issues, ensure our panel is open.
+    // -----------------------------------------------------------------
+
+    if ( subscribe && dispatch ) {
+        subscribe( function() {
+            var editorStore = wp.data.select( 'core/edit-post' )
+                           || wp.data.select( 'core/editor' );
+            if ( ! editorStore ) { return; }
+
+            // Only act when pre-publish sidebar is open
+            var sidebarOpen = editorStore.isPublishSidebarOpened
+                ? editorStore.isPublishSidebarOpened()
+                : false;
+
+            if ( ! sidebarOpen ) { return; }
+
+            // Check for issues
+            var blockEditorStore = wp.data.select( 'core/block-editor' );
+            if ( ! blockEditorStore ) { return; }
+
+            var blocks         = blockEditorStore.getBlocks();
+            var contentMissing = hasImageBlocksMissingAlt( blocks );
+
+            var featuredId = wp.data.select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
+            var featuredMissing = false;
+            if ( featuredId && featuredId > 0 ) {
+                var media = wp.data.select( 'core' ).getMedia( featuredId, { context: 'edit' } );
+                if ( media ) {
+                    featuredMissing = ( media.alt_text || '' ).trim() === '';
+                }
+            }
+
+            if ( contentMissing || featuredMissing ) {
+                // Open our specific panel via editPost dispatch
+                var editPostDispatch = wp.data.dispatch( 'core/edit-post' );
+                if ( editPostDispatch && editPostDispatch.toggleEditorPanelOpened ) {
+                    // Only open if not already open
+                    var panelId = 'uwgs-alt-text-panel/uwgs-alt-text-panel';
+                    var isOpen  = editorStore.isEditorPanelOpened
+                        ? editorStore.isEditorPanelOpened( panelId )
+                        : false;
+                    if ( ! isOpen ) {
+                        editPostDispatch.toggleEditorPanelOpened( panelId );
+                    }
+                }
+            }
+        } );
+    }
+
+    // -----------------------------------------------------------------
+    // PRE-PUBLISH PANEL COMPONENT
+    // -----------------------------------------------------------------
+
     function UWGSAltTextPanel() {
 
-        // Independent reactive useSelect calls — no dependency array
-        // ensures re-evaluation on every render for fresh state
         var contentMissing = useSelect( function( select ) {
             var blocks = select( 'core/block-editor' ).getBlocks();
             return hasImageBlocksMissingAlt( blocks );
