@@ -8,7 +8,7 @@
  *                    Copies caption to alt text server-side on attachment save and in the Add Media
  *                    modal. Updates upload status messages to prompt alt text entry.
  *                    Built for UW Graduate School.
- * Version:           2.0.0
+ * Version:           2.0.1
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -27,7 +27,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.0.0';
+    const VERSION         = '2.0.1';
 
     public static function init() {
         $instance = new self();
@@ -374,20 +374,16 @@ class UWGS_Alt_Text_Tool {
 
     public function enqueue_admin_assets( $hook ) {
 
-        // Media Library list view
         if ( 'upload.php' === $hook ) {
             $this->enqueue_list_view_assets();
         }
 
-        // Media -> Add New: per-file upload status message
         if ( 'media-new.php' === $hook ) {
             $this->enqueue_upload_page_assets();
         }
 
-        // Post edit screens
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
 
-            // Attachment edit screen
             global $post;
             if (
                 $post
@@ -398,12 +394,10 @@ class UWGS_Alt_Text_Tool {
                 $this->enqueue_attachment_edit_assets( $post->ID );
             }
 
-            // Classic editor + custom post types: pre-save scan
             if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
                 $this->enqueue_classic_presave_assets();
             }
 
-            // Add Media modal: caption-to-alt via MutationObserver
             if ( ! did_action( 'wp_enqueue_media' ) ) {
                 wp_enqueue_media();
             }
@@ -756,11 +750,13 @@ JS;
     // =========================================================================
     // CLASSIC EDITOR + CUSTOM POST TYPES: PRE-SAVE SCAN
     //
-    // Changes from v1.9.5:
-    // - Warning message simplified: no filename list, just a plain sentence
-    // - Featured image search broadened: checks multiple possible hidden
-    //   field selectors to support uw-stories and other custom post types
-    //   that may not use the standard #_thumbnail_id field name
+    // Fix from v2.0.0:
+    // - contentHasMissingAlt() is evaluated synchronously FIRST
+    // - If content images are missing alt text, show warning immediately
+    //   WITHOUT waiting for the featured image AJAX check
+    // - Featured image AJAX check only runs if content scan passes
+    // - This ensures content image warnings are never suppressed by
+    //   the async featured image check timing
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -800,12 +796,12 @@ JS;
             'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
             'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
             'i18n'          => array(
-                'warningTitle'       => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
-                'warningBodyContent' => __( 'One or more images in this post are missing alt text. Please go back and add descriptions to your images for accessibility, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
-                'warningBodyFeatured'=> __( 'The featured image for this post is also missing alt text. You can edit it via the Featured Image panel.', 'uwgs-alt-text-tool' ),
-                'warningBodyBoth'    => __( 'One or more images in this post and the featured image are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
-                'saveAnyway'         => __( 'Save anyway', 'uwgs-alt-text-tool' ),
-                'goBack'             => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
+                'warningTitle'        => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
+                'warningBodyContent'  => __( 'One or more images in this post are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
+                'warningBodyFeatured' => __( 'The featured image for this post is missing alt text. Please edit the featured image and add a description, or click "Save anyway" if it is decorative.', 'uwgs-alt-text-tool' ),
+                'warningBodyBoth'     => __( 'One or more images and the featured image are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
+                'saveAnyway'          => __( 'Save anyway', 'uwgs-alt-text-tool' ),
+                'goBack'              => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
             ),
         );
 
@@ -842,23 +838,22 @@ JS;
         document.body.appendChild( warningEl );
     }
 
-    function showWarning( hasContentImages, hasFeaturedImage ) {
+    function showWarning( hasContent, hasFeatured ) {
         warningEl.innerHTML = '';
 
         var title = document.createElement( 'strong' );
         title.textContent = i18n.warningTitle || '⚠ Accessibility: Images missing alt text';
 
-        // Choose message based on what's missing
         var bodyText;
-        if ( hasContentImages && hasFeaturedImage ) {
+        if ( hasContent && hasFeatured ) {
             bodyText = i18n.warningBodyBoth
-                || 'One or more images and the featured image are missing alt text.';
-        } else if ( hasFeaturedImage ) {
+                || 'Images and the featured image are missing alt text.';
+        } else if ( hasFeatured ) {
             bodyText = i18n.warningBodyFeatured
                 || 'The featured image is missing alt text.';
         } else {
             bodyText = i18n.warningBodyContent
-                || 'One or more images in this post are missing alt text.';
+                || 'One or more images are missing alt text.';
         }
 
         var body = document.createElement( 'p' );
@@ -905,8 +900,7 @@ JS;
     }
 
     // -----------------------------------------------------------------
-    // SCAN TINYMCE / TEXTAREA CONTENT FOR IMAGES MISSING ALT TEXT
-    // Returns true if any images are missing alt text, false otherwise.
+    // SCAN CONTENT FOR IMAGES MISSING ALT TEXT (synchronous)
     // -----------------------------------------------------------------
 
     function contentHasMissingAlt() {
@@ -931,31 +925,24 @@ JS;
 
         var imgs = tmp.querySelectorAll( 'img' );
         for ( var i = 0; i < imgs.length; i++ ) {
-            var alt = ( imgs[i].getAttribute( 'alt' ) || '' ).trim();
-            if ( alt === '' ) { return true; }
+            if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) {
+                return true;
+            }
         }
-
         return false;
     }
 
     // -----------------------------------------------------------------
-    // GET FEATURED IMAGE ATTACHMENT ID
-    // Checks multiple selectors to support classic editor, uw-stories,
-    // and other custom post types that may store the featured image ID
-    // in different hidden fields or data attributes.
+    // GET FEATURED IMAGE ID (supports multiple post type implementations)
     // -----------------------------------------------------------------
 
     function getFeaturedImageId() {
-
-        // Standard WP classic editor
         var el = document.getElementById( '_thumbnail_id' );
         if ( el ) {
             var val = parseInt( el.value, 10 );
             if ( val && val > 0 ) { return val; }
         }
 
-        // Broader search: any hidden input whose name or id contains
-        // 'thumbnail_id' or 'featured' and has a numeric value
         var candidates = document.querySelectorAll(
             'input[type="hidden"][name*="thumbnail_id"],' +
             'input[type="hidden"][id*="thumbnail_id"],' +
@@ -974,13 +961,11 @@ JS;
     }
 
     // -----------------------------------------------------------------
-    // CHECK FEATURED IMAGE ALT TEXT VIA AJAX
-    // Returns a Promise resolving to true (missing) or false (ok/none).
+    // CHECK FEATURED IMAGE ALT VIA AJAX (async, Promise)
     // -----------------------------------------------------------------
 
     function featuredImageMissingAlt() {
         return new Promise( function( resolve ) {
-
             var thumbnailId = getFeaturedImageId();
             if ( ! thumbnailId ) {
                 resolve( false );
@@ -995,14 +980,21 @@ JS;
             fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
                     resolve( response.success && ! response.data.has_alt );
                 } ).catch( function() {
-                    resolve( false ); // non-fatal
+                    resolve( false );
                 } );
         } );
     }
 
     // -----------------------------------------------------------------
     // INTERCEPT SAVE BUTTONS
-    // Uses capture phase (true) to fire before all other handlers.
+    //
+    // Key fix from v2.0.0:
+    // Run contentHasMissingAlt() synchronously first.
+    // If content images are missing alt text, show warning immediately —
+    // do NOT wait for the featured image async check.
+    // Only run the async featured image check if content scan passes.
+    // This prevents the async AJAX timing from ever suppressing the
+    // synchronous content image warning.
     // -----------------------------------------------------------------
 
     function interceptSaveButtons() {
@@ -1014,32 +1006,48 @@ JS;
 
             btn.addEventListener( 'click', function( e ) {
 
+                // Allow through if "Save anyway" was just clicked
                 if ( saving ) {
                     saving = false;
                     return;
                 }
 
+                // Don't re-intercept if warning already showing
                 if ( warningEl.classList.contains( 'visible' ) ) {
                     return;
                 }
 
+                // Always prevent default first — we'll re-trigger if clean
                 e.preventDefault();
                 e.stopImmediatePropagation();
 
                 saveTarget = btn;
 
+                // Step 1: synchronous content scan
                 var hasContent = contentHasMissingAlt();
 
+                if ( hasContent ) {
+                    // Content images missing — show warning immediately.
+                    // Also check featured image to show combined message,
+                    // but don't delay the warning for it.
+                    featuredImageMissingAlt().then( function( hasFeatured ) {
+                        showWarning( true, hasFeatured );
+                    } );
+                    return;
+                }
+
+                // Step 2: content is clean — check featured image async
                 featuredImageMissingAlt().then( function( hasFeatured ) {
-                    if ( hasContent || hasFeatured ) {
-                        showWarning( hasContent, hasFeatured );
+                    if ( hasFeatured ) {
+                        showWarning( false, true );
                     } else {
+                        // Everything clean — proceed with save
                         saving = true;
                         btn.click();
                     }
                 } );
 
-            }, true ); // capture phase
+            }, true ); // capture phase — fires before all other handlers
         } );
     }
 
@@ -1252,10 +1260,12 @@ JS;
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
     //
-    // Changes from v1.9.5:
-    // - Warning message simplified: no filename list
-    // - Featured image check uses getMedia() with proper loading state guard
-    //   and checks both alt_text (REST field) and meta for reliability
+    // Fix from v2.0.0:
+    // - useSelect dependency array changed from [] to null (no deps)
+    //   so the selector re-runs reactively whenever store state changes
+    // - hasImageBlocksMissingAlt evaluated in its own useSelect call
+    //   completely independent of the featured image check
+    // - Both checks combined only at render time, not inside useSelect
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1264,13 +1274,13 @@ JS;
         }
 
         $i18n = array(
-            'panelTitle'         => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
-            'allGood'            => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
-            'warningContent'     => __( 'One or more images in this post are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
-            'warningFeatured'    => __( 'The featured image for this post is missing alt text. Edit the featured image and add a description in the Alt Text field.', 'uwgs-alt-text-tool' ),
-            'warningBoth'        => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
-            'decorativeNote'     => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
-            'canvasBanner'       => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
+            'panelTitle'          => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
+            'allGood'             => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
+            'warningContent'      => __( 'One or more images in this post are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
+            'warningFeatured'     => __( 'The featured image for this post is missing alt text. Edit the featured image and add a description in the Alt Text field.', 'uwgs-alt-text-tool' ),
+            'warningBoth'         => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
+            'decorativeNote'      => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
+            'canvasBanner'        => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
         );
 
         wp_add_inline_script(
@@ -1364,13 +1374,18 @@ JS;
 
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
+    /**
+     * Recursively check blocks for core/image with empty alt text.
+     * Returns true as soon as one is found.
+     */
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
-            var block = blocks[i];
+            var block = blocks[ i ];
             if ( block.name === 'core/image' ) {
                 var alt = ( block.attributes && block.attributes.alt )
-                    ? block.attributes.alt.trim() : '';
+                    ? block.attributes.alt.trim()
+                    : '';
                 if ( alt === '' ) { return true; }
             }
             if ( block.innerBlocks && block.innerBlocks.length ) {
@@ -1382,36 +1397,36 @@ JS;
 
     function UWGSAltTextPanel() {
 
-        var blocks = useSelect( function( select ) {
-            return select( 'core/block-editor' ).getBlocks();
-        }, [] );
+        // Separate useSelect calls — each re-runs independently
+        // when its slice of store state changes.
+        // Passing null as dependency array means "always re-run on render"
+        // which ensures we always have fresh block data.
 
-        // Featured image check
-        // getMedia() triggers a fetch if not cached; returns undefined while loading.
-        // We treat undefined (still loading) as "no issue" to avoid false positives.
-        var featuredMissingAlt = useSelect( function( select ) {
+        var contentMissing = useSelect( function( select ) {
+            var blocks = select( 'core/block-editor' ).getBlocks();
+            return hasImageBlocksMissingAlt( blocks );
+        } );
+
+        var featuredMissing = useSelect( function( select ) {
             var featuredId = select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
 
             if ( ! featuredId || featuredId < 1 ) { return false; }
 
+            // getMedia with context:'edit' triggers REST fetch if not cached
             var media = select( 'core' ).getMedia( featuredId, { context: 'edit' } );
 
-            // Still loading — don't flag yet
+            // Return false while still loading to avoid false positives
             if ( ! media ) { return false; }
 
-            // Check alt_text (REST API field populated by core store)
-            var alt = ( media.alt_text || '' ).trim();
-            return alt === '';
-        }, [] );
+            return ( media.alt_text || '' ).trim() === '';
+        } );
 
-        var contentMissing = hasImageBlocksMissingAlt( blocks );
-        var hasIssues      = contentMissing || featuredMissingAlt;
+        var hasIssues = contentMissing || featuredMissing;
 
-        // Choose message
         var message;
-        if ( contentMissing && featuredMissingAlt ) {
-            message = i18n.warningBoth    || 'Images and featured image are missing alt text.';
-        } else if ( featuredMissingAlt ) {
+        if ( contentMissing && featuredMissing ) {
+            message = i18n.warningBoth    || 'Images and the featured image are missing alt text.';
+        } else if ( featuredMissing ) {
             message = i18n.warningFeatured || 'The featured image is missing alt text.';
         } else {
             message = i18n.warningContent  || 'One or more images are missing alt text.';
@@ -1428,10 +1443,20 @@ JS;
             hasIssues
                 ? el( Fragment, null,
                     el( 'p', {
-                        style: { margin:'0 0 10px', color:'#856404', fontSize:'13px', lineHeight:'1.6' }
+                        style: {
+                            margin:     '0 0 10px',
+                            color:      '#856404',
+                            fontSize:   '13px',
+                            lineHeight: '1.6',
+                        }
                     }, message ),
                     el( 'p', {
-                        style: { margin:'0', fontSize:'12px', color:'#555', fontStyle:'italic' }
+                        style: {
+                            margin:    '0',
+                            fontSize:  '12px',
+                            color:     '#555',
+                            fontStyle: 'italic',
+                        }
                     }, i18n.decorativeNote || 'If an image is decorative, mark it as decorative in block settings.' )
                   )
                 : el( 'p', {
