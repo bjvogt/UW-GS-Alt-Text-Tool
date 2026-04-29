@@ -6,15 +6,17 @@
  *                    and inline-editable alt text. Warns editors when images are missing alt text at
  *                    save/publish time in both classic and block editors, including featured images.
  *                    Copies caption to alt text server-side on attachment save and in the Add Media
- *                    modal. Updates upload status messages to prompt alt text entry.
- *                    Built for UW Graduate School.
- * Version:           2.0.1
+ *                    modal. Updates upload status messages to prompt alt text entry. Shows a dashboard
+ *                    widget with alt text coverage stats. Built for UW Graduate School.
+ * Version:           2.0.5
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       uwgs-alt-text-tool
  * Domain Path:       /languages
+ *
+ * IMPORTANT: bump VERSION constant whenever JS or CSS changes.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -27,7 +29,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.0.1';
+    const VERSION         = '2.0.5';
 
     public static function init() {
         $instance = new self();
@@ -61,6 +63,9 @@ class UWGS_Alt_Text_Tool {
 
         // Server-side: copy caption to alt on attachment edit (images only)
         add_action( 'edit_attachment', array( $this, 'server_copy_caption_to_alt' ) );
+
+        // Dashboard widget
+        add_action( 'wp_dashboard_setup', array( $this, 'register_dashboard_widget' ) );
 
         // Gutenberg: block canvas warning + pre-publish panel
         add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_block_editor_assets' ) );
@@ -369,10 +374,281 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
+    // DASHBOARD WIDGET
+    //
+    // Shows total images, images with alt text, images missing alt text,
+    // a visual progress bar, and a direct link to the filtered media library.
+    // Stats are cached in a transient for 12 hours to avoid expensive
+    // queries on every dashboard load. Cache is cleared when alt text
+    // is saved via the inline editor or the edit_attachment hook fires.
+    // =========================================================================
+
+    public function register_dashboard_widget() {
+        if ( ! current_user_can( 'upload_files' ) ) {
+            return;
+        }
+
+        wp_add_dashboard_widget(
+            'uwgs_alt_text_widget',
+            __( 'Image Alt Text Coverage', 'uwgs-alt-text-tool' ),
+            array( $this, 'render_dashboard_widget' )
+        );
+    }
+
+    /**
+     * Get alt text coverage stats.
+     * Cached in a transient for 12 hours.
+     * Returns array: [ total, with_alt, missing_alt, new_missing ]
+     */
+    private function get_alt_text_stats() {
+
+        $cached = get_transient( 'uwgs_alt_text_stats' );
+        if ( false !== $cached ) {
+            return $cached;
+        }
+
+        // Total images in media library
+        $total_query = new WP_Query( array(
+            'post_type'      => 'attachment',
+            'post_mime_type' => 'image',
+            'post_status'    => 'inherit',
+            'posts_per_page' => -1,
+            'fields'         => 'ids',
+            'no_found_rows'  => false,
+        ) );
+        $total = (int) $total_query->found_posts;
+
+        // Images missing alt text (meta not exists OR empty string)
+        $missing_query = new WP_Query( array(
+            'post_type'      => 'attachment',
+            'post_mime_type' => 'image',
+            'post_status'    => 'inherit',
+            'posts_per_page' => -1,
+            'fields'         => 'ids',
+            'no_found_rows'  => false,
+            'meta_query'     => array(
+                'relation' => 'OR',
+                array(
+                    'key'     => self::META_KEY,
+                    'compare' => 'NOT EXISTS',
+                ),
+                array(
+                    'key'     => self::META_KEY,
+                    'value'   => '',
+                    'compare' => '=',
+                ),
+            ),
+        ) );
+        $missing = (int) $missing_query->found_posts;
+
+        // Newly uploaded images missing alt text (flagged by our plugin)
+        $new_query = new WP_Query( array(
+            'post_type'      => 'attachment',
+            'post_mime_type' => 'image',
+            'post_status'    => 'inherit',
+            'posts_per_page' => -1,
+            'fields'         => 'ids',
+            'no_found_rows'  => false,
+            'meta_query'     => array(
+                array(
+                    'key'     => self::NEEDS_ALT_KEY,
+                    'value'   => '1',
+                    'compare' => '=',
+                ),
+            ),
+        ) );
+        $new_missing = (int) $new_query->found_posts;
+
+        $with_alt = $total - $missing;
+
+        $stats = array(
+            'total'       => $total,
+            'with_alt'    => max( 0, $with_alt ),
+            'missing'     => $missing,
+            'new_missing' => $new_missing,
+        );
+
+        // Cache for 12 hours
+        set_transient( 'uwgs_alt_text_stats', $stats, 12 * HOUR_IN_SECONDS );
+
+        return $stats;
+    }
+
+    /**
+     * Clear the stats cache.
+     * Called when alt text is saved or an attachment is edited.
+     */
+    public static function clear_stats_cache() {
+        delete_transient( 'uwgs_alt_text_stats' );
+    }
+
+    /**
+     * Render the dashboard widget HTML.
+     */
+    public function render_dashboard_widget() {
+
+        $stats       = $this->get_alt_text_stats();
+        $total       = $stats['total'];
+        $with_alt    = $stats['with_alt'];
+        $missing     = $stats['missing'];
+        $new_missing = $stats['new_missing'];
+
+        $pct         = $total > 0 ? round( ( $with_alt / $total ) * 100 ) : 100;
+        $library_url = admin_url( 'upload.php?alt_filter=blank' );
+
+        // Progress bar colour: green ≥80%, amber ≥50%, red <50%
+        if ( $pct >= 80 ) {
+            $bar_color = '#2e7d32';
+        } elseif ( $pct >= 50 ) {
+            $bar_color = '#f57c00';
+        } else {
+            $bar_color = '#c62828';
+        }
+
+        ?>
+        <div class="uwgs-widget" style="font-size:13px;line-height:1.6;">
+
+            <?php if ( $total === 0 ) : ?>
+                <p style="color:#555;margin:0;">
+                    <?php esc_html_e( 'No images found in the media library.', 'uwgs-alt-text-tool' ); ?>
+                </p>
+
+            <?php else : ?>
+
+                <?php // Progress bar ?>
+                <div style="margin-bottom:12px;">
+                    <div style="
+                        display:flex;
+                        justify-content:space-between;
+                        align-items:baseline;
+                        margin-bottom:4px;
+                    ">
+                        <span style="font-weight:600;font-size:14px;color:<?php echo esc_attr( $bar_color ); ?>;">
+                            <?php echo esc_html( $pct ); ?>%
+                            <?php esc_html_e( 'coverage', 'uwgs-alt-text-tool' ); ?>
+                        </span>
+                        <span style="color:#555;font-size:12px;">
+                            <?php echo esc_html( number_format_i18n( $with_alt ) ); ?>
+                            <?php esc_html_e( 'of', 'uwgs-alt-text-tool' ); ?>
+                            <?php echo esc_html( number_format_i18n( $total ) ); ?>
+                            <?php esc_html_e( 'images', 'uwgs-alt-text-tool' ); ?>
+                        </span>
+                    </div>
+                    <div style="
+                        background:#e0e0e0;
+                        border-radius:4px;
+                        height:10px;
+                        overflow:hidden;
+                    "
+                        role="progressbar"
+                        aria-valuenow="<?php echo esc_attr( $pct ); ?>"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                        aria-label="<?php echo esc_attr( sprintf(
+                            /* translators: %d: percentage */
+                            __( 'Alt text coverage: %d%%', 'uwgs-alt-text-tool' ),
+                            $pct
+                        ) ); ?>"
+                    >
+                        <div style="
+                            background:<?php echo esc_attr( $bar_color ); ?>;
+                            width:<?php echo esc_attr( $pct ); ?>%;
+                            height:100%;
+                            border-radius:4px;
+                            transition:width 0.3s ease;
+                        "></div>
+                    </div>
+                </div>
+
+                <?php // Stats table ?>
+                <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
+                    <tbody>
+                        <tr>
+                            <td style="padding:3px 0;color:#555;">
+                                <?php esc_html_e( 'Total images', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;">
+                                <?php echo esc_html( number_format_i18n( $total ) ); ?>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:3px 0;color:#2e7d32;">
+                                <?php esc_html_e( 'Have alt text', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#2e7d32;">
+                                <?php echo esc_html( number_format_i18n( $with_alt ) ); ?>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:3px 0;color:#c62828;">
+                                <?php esc_html_e( 'Missing alt text', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#c62828;">
+                                <?php echo esc_html( number_format_i18n( $missing ) ); ?>
+                            </td>
+                        </tr>
+                        <?php if ( $new_missing > 0 ) : ?>
+                        <tr>
+                            <td style="padding:3px 0;color:#856404;">
+                                <?php esc_html_e( 'New uploads missing alt text', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#856404;">
+                                <?php echo esc_html( number_format_i18n( $new_missing ) ); ?>
+                            </td>
+                        </tr>
+                        <?php endif; ?>
+                    </tbody>
+                </table>
+
+                <?php // Action links ?>
+                <?php if ( $missing > 0 ) : ?>
+                    <p style="margin:0 0 6px;">
+                        <a href="<?php echo esc_url( $library_url ); ?>"
+                           class="button button-primary button-small">
+                            <?php printf(
+                                /* translators: %s: number of images missing alt text */
+                                esc_html__( 'Fix %s images →', 'uwgs-alt-text-tool' ),
+                                esc_html( number_format_i18n( $missing ) )
+                            ); ?>
+                        </a>
+                    </p>
+                <?php else : ?>
+                    <p style="margin:0;color:#2e7d32;font-weight:600;">
+                        ✓ <?php esc_html_e( 'All images have alt text. Great work!', 'uwgs-alt-text-tool' ); ?>
+                    </p>
+                <?php endif; ?>
+
+                <p style="margin:6px 0 0;font-size:11px;color:#999;">
+                    <?php esc_html_e( 'Stats refresh every 12 hours.', 'uwgs-alt-text-tool' ); ?>
+                    <a href="<?php echo esc_url( add_query_arg( 'uwgs_refresh_stats', '1' ) ); ?>"
+                       style="color:#999;">
+                        <?php esc_html_e( 'Refresh now', 'uwgs-alt-text-tool' ); ?>
+                    </a>
+                </p>
+
+            <?php endif; ?>
+
+        </div>
+        <?php
+    }
+
+    // =========================================================================
     // ADMIN ASSETS
     // =========================================================================
 
     public function enqueue_admin_assets( $hook ) {
+
+        // Handle manual stats cache refresh
+        if (
+            isset( $_GET['uwgs_refresh_stats'] ) &&
+            '1' === $_GET['uwgs_refresh_stats'] &&
+            current_user_can( 'upload_files' )
+        ) {
+            self::clear_stats_cache();
+            // Redirect to clean URL after clearing
+            wp_safe_redirect( remove_query_arg( 'uwgs_refresh_stats' ) );
+            exit;
+        }
 
         if ( 'upload.php' === $hook ) {
             $this->enqueue_list_view_assets();
@@ -517,6 +793,8 @@ jQuery( function( $ ) {
                     $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
 
                     $feedback.text( i18n.saved || 'Saved.' ).addClass( 'success' );
+
+                    // Clear stats cache so dashboard widget reflects change
                     setTimeout( function() {
                         $feedback.text( '' ).removeClass( 'success' );
                     }, 3000 );
@@ -749,14 +1027,6 @@ JS;
 
     // =========================================================================
     // CLASSIC EDITOR + CUSTOM POST TYPES: PRE-SAVE SCAN
-    //
-    // Fix from v2.0.0:
-    // - contentHasMissingAlt() is evaluated synchronously FIRST
-    // - If content images are missing alt text, show warning immediately
-    //   WITHOUT waiting for the featured image AJAX check
-    // - Featured image AJAX check only runs if content scan passes
-    // - This ensures content image warnings are never suppressed by
-    //   the async featured image check timing
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -824,10 +1094,6 @@ JS;
     var saveTarget = null;
     var saving     = false;
 
-    // -----------------------------------------------------------------
-    // BUILD WARNING PANEL
-    // -----------------------------------------------------------------
-
     function buildWarningPanel() {
         warningEl = document.createElement( 'div' );
         warningEl.id = 'uwgs-presave-warning';
@@ -846,14 +1112,11 @@ JS;
 
         var bodyText;
         if ( hasContent && hasFeatured ) {
-            bodyText = i18n.warningBodyBoth
-                || 'Images and the featured image are missing alt text.';
+            bodyText = i18n.warningBodyBoth     || 'Images and the featured image are missing alt text.';
         } else if ( hasFeatured ) {
-            bodyText = i18n.warningBodyFeatured
-                || 'The featured image is missing alt text.';
+            bodyText = i18n.warningBodyFeatured || 'The featured image is missing alt text.';
         } else {
-            bodyText = i18n.warningBodyContent
-                || 'One or more images are missing alt text.';
+            bodyText = i18n.warningBodyContent  || 'One or more images are missing alt text.';
         }
 
         var body = document.createElement( 'p' );
@@ -899,10 +1162,6 @@ JS;
         saveTarget = null;
     }
 
-    // -----------------------------------------------------------------
-    // SCAN CONTENT FOR IMAGES MISSING ALT TEXT (synchronous)
-    // -----------------------------------------------------------------
-
     function contentHasMissingAlt() {
         var content = '';
 
@@ -932,10 +1191,6 @@ JS;
         return false;
     }
 
-    // -----------------------------------------------------------------
-    // GET FEATURED IMAGE ID (supports multiple post type implementations)
-    // -----------------------------------------------------------------
-
     function getFeaturedImageId() {
         var el = document.getElementById( '_thumbnail_id' );
         if ( el ) {
@@ -960,10 +1215,6 @@ JS;
         return 0;
     }
 
-    // -----------------------------------------------------------------
-    // CHECK FEATURED IMAGE ALT VIA AJAX (async, Promise)
-    // -----------------------------------------------------------------
-
     function featuredImageMissingAlt() {
         return new Promise( function( resolve ) {
             var thumbnailId = getFeaturedImageId();
@@ -979,23 +1230,9 @@ JS;
 
             fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
                     resolve( response.success && ! response.data.has_alt );
-                } ).catch( function() {
-                    resolve( false );
-                } );
+                } ).catch( function() { resolve( false ); } );
         } );
     }
-
-    // -----------------------------------------------------------------
-    // INTERCEPT SAVE BUTTONS
-    //
-    // Key fix from v2.0.0:
-    // Run contentHasMissingAlt() synchronously first.
-    // If content images are missing alt text, show warning immediately —
-    // do NOT wait for the featured image async check.
-    // Only run the async featured image check if content scan passes.
-    // This prevents the async AJAX timing from ever suppressing the
-    // synchronous content image warning.
-    // -----------------------------------------------------------------
 
     function interceptSaveButtons() {
         var saveIds = [ 'save', 'save-post', 'publish' ];
@@ -1006,52 +1243,42 @@ JS;
 
             btn.addEventListener( 'click', function( e ) {
 
-                // Allow through if "Save anyway" was just clicked
                 if ( saving ) {
                     saving = false;
                     return;
                 }
 
-                // Don't re-intercept if warning already showing
                 if ( warningEl.classList.contains( 'visible' ) ) {
                     return;
                 }
 
-                // Always prevent default first — we'll re-trigger if clean
                 e.preventDefault();
                 e.stopImmediatePropagation();
 
                 saveTarget = btn;
 
-                // Step 1: synchronous content scan
                 var hasContent = contentHasMissingAlt();
 
                 if ( hasContent ) {
-                    // Content images missing — show warning immediately.
-                    // Also check featured image to show combined message,
-                    // but don't delay the warning for it.
                     featuredImageMissingAlt().then( function( hasFeatured ) {
                         showWarning( true, hasFeatured );
                     } );
                     return;
                 }
 
-                // Step 2: content is clean — check featured image async
                 featuredImageMissingAlt().then( function( hasFeatured ) {
                     if ( hasFeatured ) {
                         showWarning( false, true );
                     } else {
-                        // Everything clean — proceed with save
                         saving = true;
                         btn.click();
                     }
                 } );
 
-            }, true ); // capture phase — fires before all other handlers
+            }, true );
         } );
     }
 
-    // Dismiss on Escape
     document.addEventListener( 'keydown', function( e ) {
         if ( e.key === 'Escape' && warningEl && warningEl.classList.contains( 'visible' ) ) {
             hideWarning();
@@ -1259,13 +1486,6 @@ JS;
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
-    //
-    // Fix from v2.0.0:
-    // - useSelect dependency array changed from [] to null (no deps)
-    //   so the selector re-runs reactively whenever store state changes
-    // - hasImageBlocksMissingAlt evaluated in its own useSelect call
-    //   completely independent of the featured image check
-    // - Both checks combined only at render time, not inside useSelect
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1274,13 +1494,13 @@ JS;
         }
 
         $i18n = array(
-            'panelTitle'          => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
-            'allGood'             => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
-            'warningContent'      => __( 'One or more images in this post are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
-            'warningFeatured'     => __( 'The featured image for this post is missing alt text. Edit the featured image and add a description in the Alt Text field.', 'uwgs-alt-text-tool' ),
-            'warningBoth'         => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
-            'decorativeNote'      => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
-            'canvasBanner'        => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
+            'panelTitle'      => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
+            'allGood'         => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
+            'warningContent'  => __( 'One or more images in this post are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
+            'warningFeatured' => __( 'The featured image for this post is missing alt text. Edit the featured image and add a description in the Alt Text field.', 'uwgs-alt-text-tool' ),
+            'warningBoth'     => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
+            'decorativeNote'  => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
+            'canvasBanner'    => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
         );
 
         wp_add_inline_script(
@@ -1308,10 +1528,7 @@ JS;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
 
-    // -----------------------------------------------------------------
-    // BLOCK CANVAS WARNING HOC
-    // -----------------------------------------------------------------
-
+    // Block canvas warning HOC
     if ( addFilter && createHOC ) {
 
         var withAltWarning = createHOC( function( BlockEdit ) {
@@ -1368,24 +1585,15 @@ JS;
         );
     }
 
-    // -----------------------------------------------------------------
-    // PRE-PUBLISH PANEL
-    // -----------------------------------------------------------------
-
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
-    /**
-     * Recursively check blocks for core/image with empty alt text.
-     * Returns true as soon as one is found.
-     */
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
             var block = blocks[ i ];
             if ( block.name === 'core/image' ) {
                 var alt = ( block.attributes && block.attributes.alt )
-                    ? block.attributes.alt.trim()
-                    : '';
+                    ? block.attributes.alt.trim() : '';
                 if ( alt === '' ) { return true; }
             }
             if ( block.innerBlocks && block.innerBlocks.length ) {
@@ -1397,11 +1605,7 @@ JS;
 
     function UWGSAltTextPanel() {
 
-        // Separate useSelect calls — each re-runs independently
-        // when its slice of store state changes.
-        // Passing null as dependency array means "always re-run on render"
-        // which ensures we always have fresh block data.
-
+        // Independent useSelect calls — each reacts to its own store slice
         var contentMissing = useSelect( function( select ) {
             var blocks = select( 'core/block-editor' ).getBlocks();
             return hasImageBlocksMissingAlt( blocks );
@@ -1409,15 +1613,9 @@ JS;
 
         var featuredMissing = useSelect( function( select ) {
             var featuredId = select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
-
             if ( ! featuredId || featuredId < 1 ) { return false; }
-
-            // getMedia with context:'edit' triggers REST fetch if not cached
             var media = select( 'core' ).getMedia( featuredId, { context: 'edit' } );
-
-            // Return false while still loading to avoid false positives
-            if ( ! media ) { return false; }
-
+            if ( ! media ) { return false; } // still loading
             return ( media.alt_text || '' ).trim() === '';
         } );
 
@@ -1425,7 +1623,7 @@ JS;
 
         var message;
         if ( contentMissing && featuredMissing ) {
-            message = i18n.warningBoth    || 'Images and the featured image are missing alt text.';
+            message = i18n.warningBoth     || 'Images and the featured image are missing alt text.';
         } else if ( featuredMissing ) {
             message = i18n.warningFeatured || 'The featured image is missing alt text.';
         } else {
@@ -1476,5 +1674,10 @@ JS;
         wp_add_inline_script( 'wp-edit-post', $js, 'after' );
     }
 }
+
+// Clear stats cache when alt text is saved via AJAX or attachment is edited
+add_action( 'wp_ajax_uwgs_save_alt_text', array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ), 1 );
+add_action( 'edit_attachment',            array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ) );
+add_action( 'add_attachment',             array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ) );
 
 add_action( 'plugins_loaded', array( 'UWGS_Alt_Text_Tool', 'init' ) );
