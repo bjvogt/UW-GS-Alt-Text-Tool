@@ -620,14 +620,28 @@ jQuery( function( $ ) {
 
     function sanitizeFilename( raw ) {
         var s = raw;
+        // 1. Strip extension
         s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
+        // 2. Replace HTML entities for multiplication sign (&#215; or &times;)
+        //    before other processing so NNNxNNN patterns are caught
+        s = s.replace( /&#215;|&times;/gi, 'x' );
+        // 3. Replace hyphens and underscores with spaces
         s = s.replace( /[-_]+/g, ' ' );
-        s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-        s = s.replace( /\b(19|20)\d{2}\b/g, '' );
-        s = s.replace( /\bscaled\b/gi, '' );
+        // 4. Remove WP thumbnail size patterns: NNNxNNN (plain x or entity-replaced)
         s = s.replace( /\b\d+x\d+\b/gi, '' );
+        // 5. Remove 8-digit date patterns (YYYYMMDD: 19xxxxxx or 20xxxxxx)
+        s = s.replace( /\b(19|20)\d{6}\b/g, '' );
+        // 6. Remove standalone 4-digit years (1900-2099) only when NOT
+        //    immediately followed by letters (avoids stripping 2026 from 2026uw3mt)
+        s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
+        // 7. Remove 'scaled' (WP large image suffix)
+        s = s.replace( /\bscaled\b/gi, '' );
+        // 8. Remove isolated 1-2 digit numbers (size variants)
+        //    but preserve longer reference numbers
         s = s.replace( /\b\d{1,2}\b/g, '' );
+        // 9. Collapse multiple spaces and trim
         s = s.replace( /\s{2,}/g, ' ' ).trim();
+        // 10. Title case
         s = s.replace( /\b\w/g, function( c ) { return c.toUpperCase(); } );
         return s;
     }
