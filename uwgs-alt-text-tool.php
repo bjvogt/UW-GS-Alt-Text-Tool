@@ -9,7 +9,7 @@
  *                    caption to alt text server-side on attachment save and in the Add Media modal.
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.1.3
+ * Version:           2.1.4
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -1005,22 +1005,53 @@ JS;
     // -----------------------------------------------------------------
 
     function getPostContent() {
+        // Flush all TinyMCE instances to their respective textareas
         if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
             try { tinyMCE.triggerSave(); } catch(e) {}
         }
+        // Return standard #content textarea value for standard editors
         var textarea = document.getElementById( 'content' );
         return textarea ? textarea.value : '';
     }
 
     function contentHasMissingAlt() {
-        var content = getPostContent();
-        if ( ! content ) { return false; }
-        var tmp = document.createElement( 'div' );
-        tmp.innerHTML = content;
-        var imgs = tmp.querySelectorAll( 'img' );
-        for ( var i = 0; i < imgs.length; i++ ) {
-            if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) { return true; }
+        var allContent = [];
+
+        if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
+            // Read directly from every TinyMCE instance — covers both standard
+            // #content editors AND ACF iframe editors (data-id="acf-editor-*")
+            tinyMCE.editors.forEach( function( editor ) {
+                if ( editor && editor.getContent ) {
+                    try {
+                        allContent.push( editor.getContent() );
+                    } catch(e) {}
+                }
+            } );
         }
+
+        // Also read #content textarea as fallback (standard classic editor)
+        var textarea = document.getElementById( 'content' );
+        if ( textarea && textarea.value ) {
+            allContent.push( textarea.value );
+        }
+
+        // If nothing found anywhere, nothing to scan
+        if ( ! allContent.length ) { return false; }
+
+        // Scan all collected content for images missing alt text
+        for ( var c = 0; c < allContent.length; c++ ) {
+            if ( ! allContent[c] ) { continue; }
+            var tmp = document.createElement( 'div' );
+            tmp.innerHTML = allContent[c];
+            var imgs = tmp.querySelectorAll( 'img' );
+            for ( var i = 0; i < imgs.length; i++ ) {
+                var alt = ( imgs[i].getAttribute( 'alt' ) || '' ).trim();
+                // Skip TinyMCE UI elements (resize handles etc)
+                if ( imgs[i].getAttribute( 'data-mce-bogus' ) ) { continue; }
+                if ( alt === '' ) { return true; }
+            }
+        }
+
         return false;
     }
 
