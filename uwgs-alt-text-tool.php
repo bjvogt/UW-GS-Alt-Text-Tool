@@ -25,7 +25,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ACTION  = 'uwgs_alt_text_inline_save';
     const META_KEY      = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY = '_uwgs_needs_alt';
-    const VERSION       = '1.7.0';
+    const VERSION       = '1.8.5';
 
     public static function init() {
         $instance = new self();
@@ -300,9 +300,9 @@ class UWGS_Alt_Text_Tool {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // List view assets
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // LIST VIEW ASSETS
+    // =========================================================================
 
     private function enqueue_list_view_assets() {
 
@@ -436,13 +436,9 @@ JS;
         wp_add_inline_script( 'jquery', $js );
     }
 
-    // -------------------------------------------------------------------------
-    // Media -> Add New: per-file upload status message
-    //
-    // Uses MutationObserver on #media-items to detect when each upload row
-    // reaches its final state (edit link appears) and replaces the link text
-    // with a prompt to add alt text. Only fires for image uploads.
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // UPLOAD PAGE ASSETS: Media -> Add New per-file status message
+    // =========================================================================
 
     private function enqueue_upload_page_assets() {
 
@@ -463,34 +459,15 @@ JS;
     var i18n       = ( typeof uwgsUploadI18n !== 'undefined' ) ? uwgsUploadI18n : {};
     var promptText = i18n.editPrompt || 'Upload complete — click here to edit and add alt text';
 
-    /**
-     * Process a single upload row.
-     * Finds the edit link and replaces its text if this is an image row
-     * and the edit link hasn't already been updated.
-     */
     function processRow( row ) {
         if ( ! row ) { return; }
 
-        // Only process image rows — check for image thumbnail or type class
-        var isImage = (
-            row.querySelector( '.media-item img' ) !== null ||
-            row.className.indexOf( 'type-image' ) > -1 ||
-            row.querySelector( '.filename' ) !== null
-        );
-
-        // Find the edit link — WP renders it as an <a> inside.edit-attachment
-        // or as a direct link in the row's.filename or.edit area
         var editLink = row.querySelector( 'a[href*="action=edit"]' )
                     || row.querySelector( '.edit-attachment a' )
                     || row.querySelector( '.media-item-info a' );
 
         if ( ! editLink ) { return; }
-
-        // Don't update twice
         if ( editLink.getAttribute( 'data-uwgs-updated' ) ) { return; }
-
-        // Only update for images — check the href for attachment edit screen
-        // and confirm the row doesn't already show an error state
         if ( row.querySelector( '.upload-error' ) ) { return; }
 
         editLink.textContent = promptText;
@@ -499,10 +476,6 @@ JS;
         editLink.style.color      = '#856404';
     }
 
-    /**
-     * Observe #media-items for new rows and changes within rows.
-     * Fires processRow when an edit link appears in a row.
-     */
     function observeUploadList() {
         var container = document.getElementById( 'media-items' );
         if ( ! container ) { return; }
@@ -510,41 +483,31 @@ JS;
         var observer = new MutationObserver( function( mutations ) {
             mutations.forEach( function( mutation ) {
 
-                // New rows added
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
-                    // The node itself might be the row
                     if ( node.id && node.id.indexOf( 'media-item-' ) === 0 ) {
                         processRow( node );
                     }
-                    // Or it might contain rows
                     var rows = node.querySelectorAll
                         ? node.querySelectorAll( '[id^="media-item-"]' )
                         : [];
                     rows.forEach( processRow );
                 } );
 
-                // Changes within existing rows (edit link added after upload)
                 if (
                     mutation.type === 'childList' &&
                     mutation.target &&
                     mutation.target.closest
                 ) {
                     var row = mutation.target.closest( '[id^="media-item-"]' );
-                    if ( row ) {
-                        processRow( row );
-                    }
+                    if ( row ) { processRow( row ); }
                 }
             } );
         } );
 
-        observer.observe( container, {
-            childList: true,
-            subtree:   true,
-        } );
+        observer.observe( container, { childList: true, subtree: true } );
     }
 
-    // Start observing when DOM is ready
     if ( document.readyState === 'loading' ) {
         document.addEventListener( 'DOMContentLoaded', observeUploadList );
     } else {
@@ -557,41 +520,32 @@ JS;
         wp_add_inline_script( 'jquery', $js, 'after' );
     }
 
-    // -------------------------------------------------------------------------
-    // Attachment edit screen assets
-    //
-    // Reads alt and caption server-side at render time.
-    // If alt is empty and caption exists, pre-populates alt field via JS
-    // and shows a yellow "Copied from caption — please review" notice.
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // ATTACHMENT EDIT SCREEN ASSETS
+    // =========================================================================
 
     private function enqueue_attachment_edit_assets( $post_id ) {
 
         $alt     = get_post_meta( $post_id, self::META_KEY, true );
         $caption = get_post_field( 'post_excerpt', $post_id );
 
-        // Determine if we should copy caption to alt
         $should_copy = ( empty( $alt ) && ! empty( $caption ) );
 
         $css = '.uwgs-attachment-alt-warning {
                 display:none; margin-top:6px; padding:8px 10px;
                 background:#fff3cd; border-left:4px solid #ffc107;
                 color:#856404; font-size:13px; border-radius:0 3px 3px 0;
-            }.uwgs-attachment-alt-warning.visible { display:block; }
+            }.uwgs-attachment-alt-warning.visible {
+                display:block;
+            }
             #attachment_alt.uwgs-field-highlight {
                 border-color:#c62828 !important;
                 box-shadow:0 0 0 1px #c62828 !important;
             }.uwgs-caption-copy-notice {
-                display:flex;
-                align-items:flex-start;
-                gap:8px;
-                margin-top:6px;
-                padding:7px 10px;
-                background:#fff3cd;
-                border-left:4px solid #ffc107;
-                color:#856404;
-                font-size:12px;
-                line-height:1.5;
+                display:flex; align-items:flex-start; gap:8px;
+                margin-top:6px; padding:7px 10px;
+                background:#fff3cd; border-left:4px solid #ffc107;
+                color:#856404; font-size:12px; line-height:1.5;
                 border-radius:0 3px 3px 0;
             }.uwgs-caption-copy-notice button {
                 background:none; border:none; padding:0;
@@ -606,14 +560,14 @@ JS;
         wp_add_inline_style( 'uwgs-attachment-edit', $css );
 
         $i18n = array(
-            'warningText'     => __( '⚠ This image has no alt text. Alt text is required for accessibility. Please add a description before saving, or confirm this image is decorative by clicking Save again.', 'uwgs-alt-text-tool' ),
-            'captionCopied'   => __( 'Alt text copied from caption — please review and edit if needed before saving.', 'uwgs-alt-text-tool' ),
-            'dismissNotice'   => __( 'Dismiss', 'uwgs-alt-text-tool' ),
+            'warningText'   => __( '⚠ This image has no alt text. Alt text is required for accessibility. Please add a description before saving, or confirm this image is decorative by clicking Save again.', 'uwgs-alt-text-tool' ),
+            'captionCopied' => __( 'Alt text copied from caption — please review and edit if needed before saving.', 'uwgs-alt-text-tool' ),
+            'dismissNotice' => __( 'Dismiss', 'uwgs-alt-text-tool' ),
         );
 
         $data = array(
-            'i18n'        => $i18n,
-            'shouldCopy'  => $should_copy,
+            'i18n'         => $i18n,
+            'shouldCopy'   => $should_copy,
             'captionValue' => $should_copy ? sanitize_text_field( $caption ) : '',
         );
 
@@ -636,16 +590,11 @@ jQuery( function( $ ) {
 
     if ( ! $altField.length ) { return; }
 
-    // -----------------------------------------------------------------
-    // CAPTION → ALT: pre-populate + show review notice
-    // -----------------------------------------------------------------
-
+    // Caption -> Alt: pre-populate + review notice
     if ( shouldCopy && capVal ) {
 
-        // Set the alt field value
         $altField.val( capVal );
 
-        // Build and insert the review notice
         var $notice = $( '<div>' ).addClass( 'uwgs-caption-copy-notice' ).attr( { 'role': 'note', 'aria-live': 'polite' } );
 
         var $msg = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
@@ -654,26 +603,17 @@ jQuery( function( $ ) {
                 'type':       'button',
                 'aria-label': i18n.dismissNotice || 'Dismiss',
                 'title':      i18n.dismissNotice || 'Dismiss',
-            } ).html( '✕' ).on( 'click', function() {
-                $notice.remove();
-            } );
+            } ).html( '✕' ).on( 'click', function() { $notice.remove(); } );
 
         $notice.append( $msg ).append( $dismiss );
         $altField.after( $notice );
 
-        // Clear notice when editor modifies the field
-        $altField.one( 'input', function() {
-            $notice.remove();
-        } );
+        $altField.one( 'input', function() { $notice.remove(); } );
     }
 
-    // -----------------------------------------------------------------
-    // SAVE WARNING: soft block if alt still empty
-    // -----------------------------------------------------------------
-
+    // Save warning: soft block if alt still empty
     var $warning = $( '<div>' ).addClass( 'uwgs-attachment-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).text( i18n.warningText || '⚠ This image has no alt text. Please add a description or click Save again to proceed.' );
 
-    // Insert warning after notice (if present) or after alt field
     $altField.after( $warning );
 
     $altField.on( 'input', function() {
@@ -707,156 +647,9 @@ JS;
         wp_add_inline_script( 'jquery', $js );
     }
 
-    // -------------------------------------------------------------------------
-    // Add Media modal: caption-to-alt via MutationObserver
-    //
-    // When the attachment details sidebar renders in the media modal,
-    // checks if alt is empty and caption has a value.
-    // If so, copies caption to alt field and shows a review notice.
-    // Uses MutationObserver — no Backbone or wp.media timing dependency.
-    // -------------------------------------------------------------------------
-
-private function enqueue_media_modal_caption_assets() {
-
-    $i18n = array(
-        'captionCopied' => __( 'Copied from caption — please review before inserting.', 'uwgs-alt-text-tool' ),
-    );
-
-    wp_add_inline_script(
-        'jquery',
-        'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';'
-    );
-
-    $js = <<<'JS'
-( function() {
-
-    'use strict';
-
-    var i18n = ( typeof uwgsModalCapI18n !== 'undefined' ) ? uwgsModalCapI18n : {};
-
-    /**
-     * Apply caption-to-alt copy on a confirmed details panel.
-     * Uses confirmed field IDs from DOM inspection:
-     *   Alt:     #attachment-details-alt-text     (TEXTAREA)
-     *   Caption: #attachment-details-caption      (TEXTAREA)
-     */
-    function applyCaptionToAlt( panel ) {
-        if ( ! panel ) { return; }
-
-        // Use confirmed IDs first, fall back to broader selectors
-        var altField = panel.querySelector( '#attachment-details-alt-text' )
-                    || panel.querySelector( 'textarea[id*="alt-text"]' )
-                    || panel.querySelector( '.setting.alt-text textarea' )
-                    || panel.querySelector( '[data-setting="alt"] textarea' )
-                    || panel.querySelector( '[data-setting="alt"] input' );
-
-        var capField = panel.querySelector( '#attachment-details-caption' )
-                    || panel.querySelector( 'textarea[id*="caption"]' )
-                    || panel.querySelector( '[data-setting="caption"] textarea' )
-                    || panel.querySelector( '[data-setting="caption"] input' );
-
-        if ( ! altField || ! capField ) { return; }
-
-        var altVal = altField.value.trim();
-        var capVal = capField.value.trim();
-
-        // Only copy if alt is empty and caption has a value
-        if ( altVal !== '' || capVal === '' ) { return; }
-
-        // Don't apply twice to the same panel instance
-        if ( altField.getAttribute( 'data-uwgs-cap-applied' ) ) { return; }
-        altField.setAttribute( 'data-uwgs-cap-applied', '1' );
-
-        // Set alt field value
-        altField.value = capVal;
-
-        // Trigger change so Backbone model syncs the value
-        altField.dispatchEvent( new Event( 'change', { bubbles: true } ) );
-        altField.dispatchEvent( new Event( 'input',  { bubbles: true } ) );
-
-        // Show review notice below the alt field's parent.setting span
-        var existing = panel.querySelector( '.uwgs-modal-cap-notice' );
-        if ( existing ) { existing.remove(); }
-
-        var notice = document.createElement( 'div' );
-        notice.className = 'uwgs-modal-cap-notice';
-        notice.setAttribute( 'role', 'note' );
-        notice.style.cssText = [
-            'margin-top:4px',
-            'padding:5px 8px',
-            'background:#fff3cd',
-            'border-left:3px solid #ffc107',
-            'color:#856404',
-            'font-size:11px',
-            'line-height:1.4',
-            'border-radius:0 2px 2px 0',
-            'display:flex',
-            'align-items:center',
-            'justify-content:space-between',
-            'gap:6px',
-        ].join( ';' );
-
-        var msg = document.createElement( 'span' );
-        msg.textContent = i18n.captionCopied || 'Copied from caption — please review before inserting.';
-
-        var dismiss = document.createElement( 'button' );
-        dismiss.type        = 'button';
-        dismiss.textContent = '✕';
-        dismiss.setAttribute( 'aria-label', 'Dismiss' );
-        dismiss.style.cssText = [
-            'background:none',
-            'border:none',
-            'cursor:pointer',
-            'color:#856404',
-            'font-size:12px',
-            'padding:0',
-            'flex-shrink:0',
-        ].join( ';' );
-        dismiss.addEventListener( 'click', function() {
-            notice.remove();
-        } );
-
-        notice.appendChild( msg );
-        notice.appendChild( dismiss );
-
-        // Insert after the.setting.alt-text span, or after the field itself
-        var altSetting = altField.closest( '.setting' );
-        if ( altSetting && altSetting.parentNode ) {
-            altSetting.parentNode.insertBefore( notice, altSetting.nextSibling );
-        } else {
-            altField.parentNode.insertBefore( notice, altField.nextSibling );
-        }
-
-        // Remove notice and clear flag when editor changes the alt field
-        altField.addEventListener( 'input', function() {
-            notice.remove();
-            altField.removeAttribute( 'data-uwgs-cap-applied' );
-        }, { once: true } );
-    }
-
-    /**
-     * Find all confirmed details panels in a container and process them.
-     * Confirmed class pattern from DOM inspection: 'attachment-details save-ready'
-     * Also handles 'attachment-details' alone for robustness.
-     */
-    function processPanels( container ) {
-        if ( ! container ) { return; }
-
-        // querySelectorAll with confirmed class — note: both classes must be present
-        var panels = container.querySelectorAll(
-            '.attachment-details.save-ready, ' +
-            '.attachment-details'
-        );
-
-        panels.forEach( function( panel ) {
-            // Short delay to allow Backbone to finish rendering field values
-            setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
-        } );
-    }
-
-    // -------------------------------------------------------------------------
-    // Classic editor: pre-save TinyMCE content scan
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // CLASSIC EDITOR: PRE-SAVE TINYMCE SCAN
+    // =========================================================================
 
     private function enqueue_classic_presave_assets() {
 
@@ -1030,39 +823,139 @@ JS;
         wp_add_inline_script( 'jquery', $js, 'after' );
     }
 
-    /**
-     * Observe a modal or frame container for details panels appearing or changing.
-     * Targets confirmed container:.media-sidebar.visible >.attachment-details.save-ready
-     */
+    // =========================================================================
+    // ADD MEDIA MODAL: CAPTION-TO-ALT VIA MUTATIONOBSERVER
+    // =========================================================================
+
+    private function enqueue_media_modal_caption_assets() {
+
+        $i18n = array(
+            'captionCopied' => __( 'Copied from caption — please review before inserting.', 'uwgs-alt-text-tool' ),
+        );
+
+        wp_add_inline_script(
+            'jquery',
+            'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';'
+        );
+
+        $js = <<<'JS'
+( function() {
+
+    'use strict';
+
+    var i18n = ( typeof uwgsModalCapI18n !== 'undefined' ) ? uwgsModalCapI18n : {};
+
+    function applyCaptionToAlt( panel ) {
+        if ( ! panel ) { return; }
+
+        var altField = panel.querySelector( '#attachment-details-alt-text' )
+                    || panel.querySelector( 'textarea[id*="alt-text"]' )
+                    || panel.querySelector( '.setting.alt-text textarea' )
+                    || panel.querySelector( '[data-setting="alt"] textarea' )
+                    || panel.querySelector( '[data-setting="alt"] input' );
+
+        var capField = panel.querySelector( '#attachment-details-caption' )
+                    || panel.querySelector( 'textarea[id*="caption"]' )
+                    || panel.querySelector( '[data-setting="caption"] textarea' )
+                    || panel.querySelector( '[data-setting="caption"] input' );
+
+        if ( ! altField || ! capField ) { return; }
+
+        var altVal = altField.value.trim();
+        var capVal = capField.value.trim();
+
+        if ( altVal !== '' || capVal === '' ) { return; }
+        if ( altField.getAttribute( 'data-uwgs-cap-applied' ) ) { return; }
+
+        altField.setAttribute( 'data-uwgs-cap-applied', '1' );
+        altField.value = capVal;
+
+        altField.dispatchEvent( new Event( 'change', { bubbles: true } ) );
+        altField.dispatchEvent( new Event( 'input',  { bubbles: true } ) );
+
+        var existing = panel.querySelector( '.uwgs-modal-cap-notice' );
+        if ( existing ) { existing.remove(); }
+
+        var notice = document.createElement( 'div' );
+        notice.className = 'uwgs-modal-cap-notice';
+        notice.setAttribute( 'role', 'note' );
+        notice.style.cssText = [
+            'margin-top:4px',
+            'padding:5px 8px',
+            'background:#fff3cd',
+            'border-left:3px solid #ffc107',
+            'color:#856404',
+            'font-size:11px',
+            'line-height:1.4',
+            'border-radius:0 2px 2px 0',
+            'display:flex',
+            'align-items:center',
+            'justify-content:space-between',
+            'gap:6px',
+        ].join( ';' );
+
+        var msg = document.createElement( 'span' );
+        msg.textContent = i18n.captionCopied || 'Copied from caption — please review before inserting.';
+
+        var dismiss = document.createElement( 'button' );
+        dismiss.type        = 'button';
+        dismiss.textContent = '✕';
+        dismiss.setAttribute( 'aria-label', 'Dismiss' );
+        dismiss.style.cssText = [
+            'background:none',
+            'border:none',
+            'cursor:pointer',
+            'color:#856404',
+            'font-size:12px',
+            'padding:0',
+            'flex-shrink:0',
+        ].join( ';' );
+        dismiss.addEventListener( 'click', function() { notice.remove(); } );
+
+        notice.appendChild( msg );
+        notice.appendChild( dismiss );
+
+        var altSetting = altField.closest( '.setting' );
+        if ( altSetting && altSetting.parentNode ) {
+            altSetting.parentNode.insertBefore( notice, altSetting.nextSibling );
+        } else {
+            altField.parentNode.insertBefore( notice, altField.nextSibling );
+        }
+
+        altField.addEventListener( 'input', function() {
+            notice.remove();
+            altField.removeAttribute( 'data-uwgs-cap-applied' );
+        }, { once: true } );
+    }
+
+    function processPanels( container ) {
+        if ( ! container ) { return; }
+        var panels = container.querySelectorAll(
+            '.attachment-details.save-ready,.attachment-details'
+        );
+        panels.forEach( function( panel ) {
+            setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
+        } );
+    }
+
     function observeModalContent( modal ) {
         if ( ! modal || modal._uwgsObserved ) { return; }
         modal._uwgsObserved = true;
 
-        // Process any panels already present
         processPanels( modal );
 
         var observer = new MutationObserver( function( mutations ) {
             mutations.forEach( function( mutation ) {
 
-                // New nodes added anywhere in the modal
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
-
-                    // Node itself is a details panel
-                    if (
-                        node.classList &&
-                        node.classList.contains( 'attachment-details' )
-                    ) {
+                    if ( node.classList && node.classList.contains( 'attachment-details' ) ) {
                         setTimeout( function() { applyCaptionToAlt( node ); }, 200 );
                         return;
                     }
-
-                    // Node contains details panels
                     processPanels( node );
                 } );
 
-                // Existing node content changed — re-check if it's inside a panel
-                // This catches Backbone re-rendering field values after selection
                 if ( mutation.type === 'childList' && mutation.target ) {
                     var panel = mutation.target.closest
                         ? mutation.target.closest( '.attachment-details' )
@@ -1074,27 +967,17 @@ JS;
             } );
         } );
 
-        observer.observe( modal, {
-            childList: true,
-            subtree:   true,
-        } );
+        observer.observe( modal, { childList: true, subtree: true } );
     }
 
-    /**
-     * Watch document.body for the media modal appearing.
-     * Confirmed container classes:.media-modal,.media-frame
-     */
     function observeForModal() {
 
-        // Handle modals already in DOM
         document.querySelectorAll( '.media-modal,.media-frame' ).forEach( observeModalContent );
 
-        // Watch for modals added dynamically
         var bodyObserver = new MutationObserver( function( mutations ) {
             mutations.forEach( function( mutation ) {
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
-
                     if (
                         node.classList && (
                             node.classList.contains( 'media-modal' ) ||
@@ -1104,16 +987,12 @@ JS;
                         observeModalContent( node );
                         return;
                     }
-
                     node.querySelectorAll && node.querySelectorAll( '.media-modal,.media-frame' ).forEach( observeModalContent );
                 } );
             } );
         } );
 
-        bodyObserver.observe( document.body, {
-            childList: true,
-            subtree:   false, // Only watch direct children of body for performance
-        } );
+        bodyObserver.observe( document.body, { childList: true, subtree: false } );
     }
 
     if ( document.readyState === 'loading' ) {
@@ -1125,8 +1004,8 @@ JS;
 } )();
 JS;
 
-    wp_add_inline_script( 'jquery', $js, 'after' );
-}
+        wp_add_inline_script( 'jquery', $js, 'after' );
+    }
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
@@ -1241,7 +1120,9 @@ JS;
                 if ( alt === '' ) {
                     missing.push( {
                         clientId: block.clientId || '',
-                        filename: getFilename( ( block.attributes && block.attributes.url ) || '' ),
+                        filename: getFilename(
+                            ( block.attributes && block.attributes.url ) || ''
+                        ),
                     } );
                 }
             }
@@ -1260,7 +1141,7 @@ JS;
     }
 
     function UWGSAltTextPanel() {
-        var blocks    = useSelect( function( select ) {
+        var blocks = useSelect( function( select ) {
             return select( 'core/block-editor' ).getBlocks();
         }, [] );
         var missing   = findImageBlocksMissingAlt( blocks );
@@ -1276,18 +1157,21 @@ JS;
             },
             hasIssues
                 ? el( Fragment, null,
-                    el( 'p', { style: { margin:'0 0 8px', color:'#856404', fontSize:'13px', lineHeight:'1.5' } },
-                        i18n.warningIntro || 'The following images are missing alt text:' ),
-                    el( 'ul', { style: { margin:'0 0 10px 16px', padding:'0', fontSize:'13px', color:'#c62828', lineHeight:'1.6' } },
-                        missing.map( function( item, index ) {
-                            return el( 'li', { key: item.clientId || index }, item.filename );
-                        } )
-                    ),
-                    el( 'p', { style: { margin:'0', fontSize:'12px', color:'#555', fontStyle:'italic' } },
-                        i18n.decorativeNote || 'If an image is decorative, mark it as decorative in block settings.' )
+                    el( 'p', {
+                        style: { margin:'0 0 8px', color:'#856404', fontSize:'13px', lineHeight:'1.5' }
+                    }, i18n.warningIntro || 'The following images are missing alt text:' ),
+                    el( 'ul', {
+                        style: { margin:'0 0 10px 16px', padding:'0', fontSize:'13px', color:'#c62828', lineHeight:'1.6' }
+                    }, missing.map( function( item, index ) {
+                        return el( 'li', { key: item.clientId || index }, item.filename );
+                    } ) ),
+                    el( 'p', {
+                        style: { margin:'0', fontSize:'12px', color:'#555', fontStyle:'italic' }
+                    }, i18n.decorativeNote || 'If an image is decorative, mark it as decorative in block settings.' )
                   )
-                : el( 'p', { style: { margin:'0', color:'#2e7d32', fontSize:'13px' } },
-                    i18n.allGood || '✓ All images in this post have alt text.' )
+                : el( 'p', {
+                    style: { margin:'0', color:'#2e7d32', fontSize:'13px' }
+                }, i18n.allGood || '✓ All images in this post have alt text.' )
         );
     }
 
