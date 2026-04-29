@@ -30,7 +30,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.1.1';
+    const VERSION         = '2.1.2';
 
     /**
      * Post types that use a custom save mechanism incompatible with our
