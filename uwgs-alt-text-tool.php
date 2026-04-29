@@ -4,10 +4,11 @@
  * Plugin URI:        https://grad.uw.edu
  * Description:       Adds an Alt Text column to the Media Library list view with sortable, filterable,
  *                    and inline-editable alt text. Warns editors when images are missing alt text at
- *                    save/publish time in both classic and block editors. Copies caption to alt text
- *                    server-side on attachment save and in the Add Media modal. Updates upload status
- *                    messages to prompt alt text entry. Built for UW Graduate School.
- * Version:           1.9.0
+ *                    save/publish time in both classic and block editors, including featured images.
+ *                    Copies caption to alt text server-side on attachment save and in the Add Media
+ *                    modal. Updates upload status messages to prompt alt text entry.
+ *                    Built for UW Graduate School.
+ * Version:           1.9.5
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -22,10 +23,11 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 class UWGS_Alt_Text_Tool {
 
-    const NONCE_ACTION  = 'uwgs_alt_text_inline_save';
-    const META_KEY      = '_wp_attachment_image_alt';
-    const NEEDS_ALT_KEY = '_uwgs_needs_alt';
-    const VERSION       = '1.9.0';
+    const NONCE_ACTION     = 'uwgs_alt_text_inline_save';
+    const NONCE_ALT_CHECK  = 'uwgs_get_attachment_alt';
+    const META_KEY         = '_wp_attachment_image_alt';
+    const NEEDS_ALT_KEY    = '_uwgs_needs_alt';
+    const VERSION          = '1.9.5';
 
     public static function init() {
         $instance = new self();
@@ -50,6 +52,9 @@ class UWGS_Alt_Text_Tool {
 
         // AJAX: inline save
         add_action( 'wp_ajax_uwgs_save_alt_text', array( $this, 'ajax_save_alt_text' ) );
+
+        // AJAX: get attachment alt text by ID (for featured image check)
+        add_action( 'wp_ajax_uwgs_get_attachment_alt', array( $this, 'ajax_get_attachment_alt' ) );
 
         // Flag new image uploads missing alt text
         add_action( 'add_attachment', array( $this, 'flag_new_upload' ) );
@@ -262,42 +267,72 @@ class UWGS_Alt_Text_Tool {
 
     // =========================================================================
     // SERVER-SIDE: COPY CAPTION TO ALT ON ATTACHMENT EDIT
-    //
-    // Fires on edit_attachment — every time an attachment is updated,
-    // including when the media modal saves caption after upload.
-    // Images only. Does not overwrite existing alt text.
-    // Silent — no notice, just copies.
     // =========================================================================
 
     public function server_copy_caption_to_alt( $post_id ) {
 
-        // Images only
         $mime = get_post_mime_type( $post_id );
         if ( strpos( $mime, 'image/' ) !== 0 ) {
             return;
         }
 
-        // Only copy if alt is currently empty
         $current_alt = get_post_meta( $post_id, self::META_KEY, true );
         if ( ! empty( $current_alt ) ) {
             return;
         }
 
-        // Get caption from post
         $caption = get_post_field( 'post_excerpt', $post_id );
         if ( empty( $caption ) ) {
             return;
         }
 
-        // Copy caption to alt
         update_post_meta(
             $post_id,
             self::META_KEY,
             sanitize_text_field( $caption )
         );
 
-        // Clear "needs alt" flag — alt is now set
         delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
+    }
+
+    // =========================================================================
+    // AJAX: GET ATTACHMENT ALT TEXT
+    // Used by classic editor featured image check at save time.
+    // =========================================================================
+
+    public function ajax_get_attachment_alt() {
+
+        // Verify nonce
+        if ( ! isset( $_POST['nonce'] )
+             || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ALT_CHECK ) ) {
+            wp_send_json_error( 'Security check failed.' );
+        }
+
+        // Capability check
+        if ( ! current_user_can( 'edit_posts' ) ) {
+            wp_send_json_error( 'Insufficient permissions.' );
+        }
+
+        $attachment_id = isset( $_POST['attachment_id'] )
+            ? absint( $_POST['attachment_id'] )
+            : 0;
+
+        if ( ! $attachment_id ) {
+            wp_send_json_error( 'Invalid attachment ID.' );
+        }
+
+        // Confirm it's an attachment
+        if ( 'attachment' !== get_post_type( $attachment_id ) ) {
+            wp_send_json_error( 'Not an attachment.' );
+        }
+
+        $alt = get_post_meta( $attachment_id, self::META_KEY, true );
+
+        wp_send_json_success( array(
+            'alt'           => $alt,
+            'has_alt'       => ! empty( $alt ),
+            'attachment_id' => $attachment_id,
+        ) );
     }
 
     // =========================================================================
@@ -330,7 +365,7 @@ class UWGS_Alt_Text_Tool {
                 $this->enqueue_attachment_edit_assets( $post->ID );
             }
 
-            // Classic editor: pre-save TinyMCE scan
+            // Classic editor: pre-save TinyMCE scan + featured image check
             if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
                 $this->enqueue_classic_presave_assets();
             }
@@ -480,7 +515,7 @@ JS;
     }
 
     // =========================================================================
-    // UPLOAD PAGE ASSETS: Media -> Add New per-file status message
+    // UPLOAD PAGE ASSETS
     // =========================================================================
 
     private function enqueue_upload_page_assets() {
@@ -578,9 +613,7 @@ JS;
                 display:none; margin-top:6px; padding:8px 10px;
                 background:#fff3cd; border-left:4px solid #ffc107;
                 color:#856404; font-size:13px; border-radius:0 3px 3px 0;
-            }.uwgs-attachment-alt-warning.visible {
-                display:block;
-            }
+            }.uwgs-attachment-alt-warning.visible { display:block; }
             #attachment_alt.uwgs-field-highlight {
                 border-color:#c62828 !important;
                 box-shadow:0 0 0 1px #c62828 !important;
@@ -633,7 +666,6 @@ jQuery( function( $ ) {
 
     if ( ! $altField.length ) { return; }
 
-    // Caption -> Alt: pre-populate + review notice
     if ( shouldCopy && capVal ) {
 
         $altField.val( capVal );
@@ -650,11 +682,9 @@ jQuery( function( $ ) {
 
         $notice.append( $msg ).append( $dismiss );
         $altField.after( $notice );
-
         $altField.one( 'input', function() { $notice.remove(); } );
     }
 
-    // Save warning: soft block if alt still empty
     var $warning = $( '<div>' ).addClass( 'uwgs-attachment-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).text( i18n.warningText || '⚠ This image has no alt text. Please add a description or click Save again to proceed.' );
 
     $altField.after( $warning );
@@ -691,7 +721,14 @@ JS;
     }
 
     // =========================================================================
-    // CLASSIC EDITOR: PRE-SAVE TINYMCE SCAN
+    // CLASSIC EDITOR: PRE-SAVE TINYMCE SCAN + FEATURED IMAGE CHECK
+    //
+    // Key changes from v1.9.0:
+    // - Save button binding uses native addEventListener with capture:true
+    //   so our handler fires before any other plugin's handler regardless
+    //   of registration order. Fixes uw-stories race condition.
+    // - Featured image alt text checked via AJAX before showing warning.
+    //   Uses #_thumbnail_id hidden field to get attachment ID.
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -727,39 +764,120 @@ JS;
         wp_enqueue_style( 'uwgs-classic-presave' );
         wp_add_inline_style( 'uwgs-classic-presave', $css );
 
-        $i18n = array(
-            'warningTitle' => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
-            'warningIntro' => __( 'The following images in this post have no alt text. Please go back and add descriptions, or click "Save anyway" if they are decorative.', 'uwgs-alt-text-tool' ),
-            'saveAnyway'   => __( 'Save anyway', 'uwgs-alt-text-tool' ),
-            'goBack'       => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
-            'unknownImage' => __( '(image without filename)', 'uwgs-alt-text-tool' ),
+        $data = array(
+            'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
+            'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
+            'i18n'         => array(
+                'warningTitle'        => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
+                'warningIntro'        => __( 'The following images in this post have no alt text. Please go back and add descriptions, or click "Save anyway" if they are decorative.', 'uwgs-alt-text-tool' ),
+                'saveAnyway'          => __( 'Save anyway', 'uwgs-alt-text-tool' ),
+                'goBack'              => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
+                'unknownImage'        => __( '(image without filename)', 'uwgs-alt-text-tool' ),
+                'featuredImageLabel'  => __( 'Featured image', 'uwgs-alt-text-tool' ),
+            ),
         );
 
         wp_add_inline_script(
             'jquery',
-            'var uwgsPresaveI18n = '. wp_json_encode( $i18n ). ';'
+            'var uwgsPresaveData = '. wp_json_encode( $data ). ';'
         );
 
         $js = <<<'JS'
-jQuery( function( $ ) {
+( function() {
 
     'use strict';
 
-    var i18n       = ( typeof uwgsPresaveI18n !== 'undefined' ) ? uwgsPresaveI18n : {};
-    var $warning   = null;
-    var saveTarget = null;
+    var data    = ( typeof uwgsPresaveData !== 'undefined' ) ? uwgsPresaveData : {};
+    var ajaxUrl = data.ajaxUrl       || '';
+    var nonce   = data.altCheckNonce || '';
+    var i18n    = data.i18n          || {};
 
-    $warning = $( '<div>' ).attr( {
-            'id':         'uwgs-presave-warning',
-            'role':       'alertdialog',
-            'aria-live':  'assertive',
-            'aria-modal': 'false',
-            'tabindex':   '-1',
+    // Warning panel element — built once, reused
+    var warningEl  = null;
+    var saveTarget = null;
+    var saving     = false; // true when "Save anyway" was clicked
+
+    // -----------------------------------------------------------------
+    // BUILD WARNING PANEL
+    // -----------------------------------------------------------------
+
+    function buildWarningPanel() {
+        warningEl = document.createElement( 'div' );
+        warningEl.id              = 'uwgs-presave-warning';
+        warningEl.setAttribute( 'role',       'alertdialog' );
+        warningEl.setAttribute( 'aria-live',  'assertive' );
+        warningEl.setAttribute( 'aria-modal', 'false' );
+        warningEl.setAttribute( 'tabindex',   '-1' );
+        document.body.appendChild( warningEl );
+    }
+
+    function showWarning( missing ) {
+        warningEl.innerHTML = '';
+
+        var title = document.createElement( 'strong' );
+        title.textContent = i18n.warningTitle || '⚠ Images missing alt text';
+
+        var intro = document.createElement( 'p' );
+        intro.style.margin    = '0 0 6px';
+        intro.textContent = i18n.warningIntro || 'The following images have no alt text:';
+
+        var list = document.createElement( 'ul' );
+        missing.forEach( function( label ) {
+            var li = document.createElement( 'li' );
+            li.textContent = label;
+            list.appendChild( li );
         } );
 
-    $( 'body' ).append( $warning );
+        var actions = document.createElement( 'div' );
+        actions.className = 'uwgs-warning-actions';
 
-    function scanForMissingAlt() {
+        var goBack = document.createElement( 'button' );
+        goBack.type      = 'button';
+        goBack.className = 'button button-primary';
+        goBack.textContent = i18n.goBack || 'Go back and fix';
+        goBack.addEventListener( 'click', function() {
+            hideWarning();
+            if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.activeEditor ) {
+                tinyMCE.activeEditor.focus();
+            }
+        } );
+
+        var saveAnyway = document.createElement( 'button' );
+        saveAnyway.type      = 'button';
+        saveAnyway.className = 'button';
+        saveAnyway.textContent = i18n.saveAnyway || 'Save anyway';
+        saveAnyway.addEventListener( 'click', function() {
+            hideWarning();
+            saving = true;
+            // Trigger the original save target directly
+            if ( saveTarget ) {
+                saveTarget.click();
+            }
+        } );
+
+        actions.appendChild( goBack );
+        actions.appendChild( saveAnyway );
+
+        warningEl.appendChild( title );
+        warningEl.appendChild( intro );
+        warningEl.appendChild( list );
+        warningEl.appendChild( actions );
+
+        warningEl.classList.add( 'visible' );
+        warningEl.focus();
+    }
+
+    function hideWarning() {
+        warningEl.classList.remove( 'visible' );
+        warningEl.innerHTML = '';
+        saveTarget = null;
+    }
+
+    // -----------------------------------------------------------------
+    // SCAN TINYMCE CONTENT FOR IMAGES MISSING ALT TEXT
+    // -----------------------------------------------------------------
+
+    function scanContentImages() {
         var missing = [];
         var content = '';
 
@@ -768,25 +886,24 @@ jQuery( function( $ ) {
             tinyMCE.activeEditor &&
             ! tinyMCE.activeEditor.isHidden()
         ) {
-            // Force sync TinyMCE content to textarea before scanning
-            // Fixes multi-image case where content not yet synced at save time
-            tinyMCE.activeEditor.save();
+            tinyMCE.activeEditor.save(); // force sync before reading
             content = tinyMCE.activeEditor.getContent();
         } else {
-            content = $( '#content' ).val() || '';
+            var textarea = document.getElementById( 'content' );
+            content = textarea ? textarea.value : '';
         }
 
         if ( ! content ) { return missing; }
 
-        var $parsed = $( '<div>' ).html( content );
+        var tmp = document.createElement( 'div' );
+        tmp.innerHTML = content;
 
-        $parsed.find( 'img' ).each( function() {
-            var alt = ( $( this ).attr( 'alt' ) || '' ).trim();
+        tmp.querySelectorAll( 'img' ).forEach( function( img ) {
+            var alt = ( img.getAttribute( 'alt' ) || '' ).trim();
             if ( alt === '' ) {
-                var src      = $( this ).attr( 'src' ) || '';
+                var src      = img.getAttribute( 'src' ) || '';
                 var parts    = src.split( '/' );
-                var filename = parts[ parts.length - 1 ] || '';
-                filename = filename.split( '?' )[0];
+                var filename = ( parts[ parts.length - 1 ] || '' ).split( '?' )[0];
                 filename = filename.replace( /-\d+x\d+(\.\w+)$/, '$1' );
                 missing.push( filename || i18n.unknownImage || '(image without filename)' );
             }
@@ -795,75 +912,117 @@ jQuery( function( $ ) {
         return missing;
     }
 
-    function showWarning( missing ) {
-        $warning.empty();
+    // -----------------------------------------------------------------
+    // CHECK FEATURED IMAGE ALT TEXT VIA AJAX
+    // Returns a Promise that resolves to a label string if missing,
+    // or null if alt text is present or no featured image is set.
+    // -----------------------------------------------------------------
 
-        var $title = $( '<strong>' ).text( i18n.warningTitle || '⚠ Images missing alt text' );
-        var $intro = $( '<p>' ).css( 'margin', '0 0 6px' ).text( i18n.warningIntro || 'The following images have no alt text:' );
+    function checkFeaturedImageAlt() {
+        return new Promise( function( resolve ) {
 
-        var $list = $( '<ul>' );
-        missing.forEach( function( filename ) {
-            $list.append( $( '<li>' ).text( filename ) );
+            var thumbnailInput = document.getElementById( '_thumbnail_id' );
+            var thumbnailId    = thumbnailInput ? parseInt( thumbnailInput.value, 10 ) : 0;
+
+            // -1 means no featured image set
+            if ( ! thumbnailId || thumbnailId < 1 ) {
+                resolve( null );
+                return;
+            }
+
+            var formData = new FormData();
+            formData.append( 'action',        'uwgs_get_attachment_alt' );
+            formData.append( 'nonce',         nonce );
+            formData.append( 'attachment_id', thumbnailId );
+
+            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
+                    if ( response.success && ! response.data.has_alt ) {
+                        resolve( i18n.featuredImageLabel || 'Featured image' );
+                    } else {
+                        resolve( null );
+                    }
+                } ).catch( function() {
+                    resolve( null ); // non-fatal: don't block save on network error
+                } );
         } );
-
-        var $actions = $( '<div>' ).addClass( 'uwgs-warning-actions' );
-
-        var $goBack = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button button-primary' ).text( i18n.goBack || 'Go back and fix' ).on( 'click', function() {
-                hideWarning();
-                if (
-                    typeof window.tinyMCE !== 'undefined' &&
-                    tinyMCE.activeEditor
-                ) {
-                    tinyMCE.activeEditor.focus();
-                }
-            } );
-
-        var $saveAnyway = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button' ).text( i18n.saveAnyway || 'Save anyway' ).on( 'click', function() {
-                hideWarning();
-                if ( saveTarget ) {
-                    $( saveTarget ).off( 'click.uwgsPresave' ).trigger( 'click' );
-                }
-            } );
-
-        $actions.append( $goBack ).append( $saveAnyway );
-        $warning.append( $title ).append( $intro ).append( $list ).append( $actions );
-        $warning.addClass( 'visible' );
-        $warning.trigger( 'focus' );
     }
 
-    function hideWarning() {
-        $warning.removeClass( 'visible' ).empty();
-        saveTarget = null;
+    // -----------------------------------------------------------------
+    // INTERCEPT SAVE BUTTONS
+    //
+    // Uses native addEventListener with capture:true so our handler
+    // fires in the capture phase — before any bubble-phase handlers
+    // registered by other plugins or the custom post type.
+    // This fixes the uw-stories race condition where their handler
+    // was proceeding before our preventDefault could stop it.
+    // -----------------------------------------------------------------
+
+    function interceptSaveButtons() {
+        var saveIds = [ 'save', 'save-post', 'publish' ];
+
+        saveIds.forEach( function( id ) {
+            var btn = document.getElementById( id );
+            if ( ! btn ) { return; }
+
+            btn.addEventListener( 'click', function( e ) {
+
+                // If "Save anyway" was just clicked, allow this through
+                if ( saving ) {
+                    saving = false;
+                    return;
+                }
+
+                // Don't intercept if warning is already showing
+                if ( warningEl.classList.contains( 'visible' ) ) {
+                    return;
+                }
+
+                var contentMissing = scanContentImages();
+
+                // Check featured image asynchronously, then show warning if needed
+                e.preventDefault();
+                e.stopImmediatePropagation();
+
+                saveTarget = btn;
+
+                checkFeaturedImageAlt().then( function( featuredLabel ) {
+                    var allMissing = contentMissing.slice();
+                    if ( featuredLabel ) {
+                        allMissing.push( featuredLabel );
+                    }
+
+                    if ( allMissing.length ) {
+                        showWarning( allMissing );
+                    } else {
+                        // Nothing missing — proceed with save
+                        saving = true;
+                        btn.click();
+                    }
+                } );
+
+            }, true ); // true = capture phase
+        } );
     }
 
-    var saveSelectors = [
-        '#publish',
-        '#save-post',
-        'input[name="save"]',
-        'input[name="publish"]',
-    ].join( ', ' );
-
-    $( document ).on( 'click.uwgsPresave', saveSelectors, function( e ) {
-        if ( $warning.hasClass( 'visible' ) ) { return true; }
-        if ( $( this ).closest( '#autosave,.inline-edit-row' ).length ) { return true; }
-
-        var missing = scanForMissingAlt();
-        if ( ! missing.length ) { return true; }
-
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        saveTarget = this;
-        showWarning( missing );
-        return false;
-    } );
-
-    $( document ).on( 'keydown.uwgsPresave', function( e ) {
-        if ( 27 === e.which && $warning.hasClass( 'visible' ) ) {
+    // Dismiss on Escape
+    document.addEventListener( 'keydown', function( e ) {
+        if ( e.key === 'Escape' && warningEl && warningEl.classList.contains( 'visible' ) ) {
             hideWarning();
         }
     } );
 
-} );
+    // Init
+    if ( document.readyState === 'loading' ) {
+        document.addEventListener( 'DOMContentLoaded', function() {
+            buildWarningPanel();
+            interceptSaveButtons();
+        } );
+    } else {
+        buildWarningPanel();
+        interceptSaveButtons();
+    }
+
+} )();
 JS;
 
         wp_add_inline_script( 'jquery', $js, 'after' );
@@ -1017,7 +1176,6 @@ JS;
     }
 
     function observeForModal() {
-
         document.querySelectorAll( '.media-modal,.media-frame' ).forEach( observeModalContent );
 
         var bodyObserver = new MutationObserver( function( mutations ) {
@@ -1055,6 +1213,7 @@ JS;
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
+    // Featured image check added to pre-publish panel via core store.
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1063,12 +1222,14 @@ JS;
         }
 
         $i18n = array(
-            'panelTitle'     => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
-            'allGood'        => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
-            'warningIntro'   => __( 'The following images are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
-            'decorativeNote' => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
-            'noFilename'     => __( '(no filename)', 'uwgs-alt-text-tool' ),
-            'canvasBanner'   => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
+            'panelTitle'          => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
+            'allGood'             => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
+            'warningIntro'        => __( 'The following images are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
+            'decorativeNote'      => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
+            'noFilename'          => __( '(no filename)', 'uwgs-alt-text-tool' ),
+            'canvasBanner'        => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
+            'featuredImageLabel'  => __( 'Featured image', 'uwgs-alt-text-tool' ),
+            'featuredImageNote'   => __( 'The featured image for this post has no alt text. Edit the featured image and add a description.', 'uwgs-alt-text-tool' ),
         );
 
         wp_add_inline_script(
@@ -1096,7 +1257,10 @@ JS;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
 
-    // Block canvas warning HOC
+    // -----------------------------------------------------------------
+    // BLOCK CANVAS WARNING HOC
+    // -----------------------------------------------------------------
+
     if ( addFilter && createHOC ) {
 
         var withAltWarning = createHOC( function( BlockEdit ) {
@@ -1153,7 +1317,11 @@ JS;
         );
     }
 
-    // Pre-publish panel
+    // -----------------------------------------------------------------
+    // PRE-PUBLISH PANEL
+    // Checks both image blocks and featured image alt text.
+    // -----------------------------------------------------------------
+
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
     function findImageBlocksMissingAlt( blocks ) {
@@ -1187,11 +1355,26 @@ JS;
     }
 
     function UWGSAltTextPanel() {
+
         var blocks = useSelect( function( select ) {
             return select( 'core/block-editor' ).getBlocks();
         }, [] );
+
+        // Get featured image attachment data from core store
+        var featuredImageMissingAlt = useSelect( function( select ) {
+            var featuredMediaId = select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
+
+            if ( ! featuredMediaId ) { return false; }
+
+            var media = select( 'core' ).getMedia( featuredMediaId );
+            if ( ! media ) { return false; } // still loading
+
+            var alt = ( media.alt_text || '' ).trim();
+            return alt === '';
+        }, [] );
+
         var missing   = findImageBlocksMissingAlt( blocks );
-        var hasIssues = missing.length > 0;
+        var hasIssues = missing.length > 0 || featuredImageMissingAlt;
 
         return el(
             PluginPrePublishPanel,
@@ -1203,14 +1386,37 @@ JS;
             },
             hasIssues
                 ? el( Fragment, null,
-                    el( 'p', {
-                        style: { margin:'0 0 8px', color:'#856404', fontSize:'13px', lineHeight:'1.5' }
-                    }, i18n.warningIntro || 'The following images are missing alt text:' ),
-                    el( 'ul', {
-                        style: { margin:'0 0 10px 16px', padding:'0', fontSize:'13px', color:'#c62828', lineHeight:'1.6' }
-                    }, missing.map( function( item, index ) {
-                        return el( 'li', { key: item.clientId || index }, item.filename );
-                    } ) ),
+
+                    // Featured image warning (if applicable)
+                    featuredImageMissingAlt
+                        ? el( 'p', {
+                            style: {
+                                margin:     '0 0 10px',
+                                padding:    '8px 10px',
+                                background: '#fef3cd',
+                                border:     '1px solid #ffc107',
+                                borderRadius: '3px',
+                                color:      '#856404',
+                                fontSize:   '13px',
+                                lineHeight: '1.5',
+                            }
+                        }, '⚠ ' + ( i18n.featuredImageNote || 'The featured image has no alt text.' ) )
+                        : null,
+
+                    // Content image warnings (if applicable)
+                    missing.length
+                        ? el( Fragment, null,
+                            el( 'p', {
+                                style: { margin:'0 0 8px', color:'#856404', fontSize:'13px', lineHeight:'1.5' }
+                            }, i18n.warningIntro || 'The following images are missing alt text:' ),
+                            el( 'ul', {
+                                style: { margin:'0 0 10px 16px', padding:'0', fontSize:'13px', color:'#c62828', lineHeight:'1.6' }
+                            }, missing.map( function( item, index ) {
+                                return el( 'li', { key: item.clientId || index }, item.filename );
+                            } ) )
+                          )
+                        : null,
+
                     el( 'p', {
                         style: { margin:'0', fontSize:'12px', color:'#555', fontStyle:'italic' }
                     }, i18n.decorativeNote || 'If an image is decorative, mark it as decorative in block settings.' )
@@ -1266,6 +1472,42 @@ JS;
         wp_send_json_success( array(
             'alt_text' => $alt_text,
             'message'  => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
+        ) );
+    }
+
+    // =========================================================================
+    // AJAX: GET ATTACHMENT ALT TEXT
+    // =========================================================================
+
+    public function ajax_get_attachment_alt() {
+
+        if ( ! isset( $_POST['nonce'] )
+             || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ALT_CHECK ) ) {
+            wp_send_json_error( 'Security check failed.' );
+        }
+
+        if ( ! current_user_can( 'edit_posts' ) ) {
+            wp_send_json_error( 'Insufficient permissions.' );
+        }
+
+        $attachment_id = isset( $_POST['attachment_id'] )
+            ? absint( $_POST['attachment_id'] )
+            : 0;
+
+        if ( ! $attachment_id ) {
+            wp_send_json_error( 'Invalid attachment ID.' );
+        }
+
+        if ( 'attachment' !== get_post_type( $attachment_id ) ) {
+            wp_send_json_error( 'Not an attachment.' );
+        }
+
+        $alt = get_post_meta( $attachment_id, self::META_KEY, true );
+
+        wp_send_json_success( array(
+            'alt'           => $alt,
+            'has_alt'       => ! empty( $alt ),
+            'attachment_id' => $attachment_id,
         ) );
     }
 }
