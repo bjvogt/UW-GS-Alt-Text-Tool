@@ -5,9 +5,9 @@
  * Description:       Adds an Alt Text column to the Media Library list view with sortable, filterable,
  *                    and inline-editable alt text. Warns editors when images are missing alt text at
  *                    save/publish time in both classic and block editors. Copies caption to alt text
- *                    with notice on attachment edit screen and in the Add Media modal. Updates upload
- *                    status messages to prompt alt text entry. Built for UW Graduate School.
- * Version:           1.8.5
+ *                    server-side on attachment save and in the Add Media modal. Updates upload status
+ *                    messages to prompt alt text entry. Built for UW Graduate School.
+ * Version:           1.9.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -25,7 +25,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ACTION  = 'uwgs_alt_text_inline_save';
     const META_KEY      = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY = '_uwgs_needs_alt';
-    const VERSION       = '1.8.5';
+    const VERSION       = '1.9.0';
 
     public static function init() {
         $instance = new self();
@@ -53,6 +53,9 @@ class UWGS_Alt_Text_Tool {
 
         // Flag new image uploads missing alt text
         add_action( 'add_attachment', array( $this, 'flag_new_upload' ) );
+
+        // Server-side: copy caption to alt on attachment edit (images only)
+        add_action( 'edit_attachment', array( $this, 'server_copy_caption_to_alt' ) );
 
         // Gutenberg: block canvas warning + pre-publish panel
         add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_block_editor_assets' ) );
@@ -255,6 +258,46 @@ class UWGS_Alt_Text_Tool {
         if ( empty( $alt ) ) {
             update_post_meta( $post_id, self::NEEDS_ALT_KEY, '1' );
         }
+    }
+
+    // =========================================================================
+    // SERVER-SIDE: COPY CAPTION TO ALT ON ATTACHMENT EDIT
+    //
+    // Fires on edit_attachment — every time an attachment is updated,
+    // including when the media modal saves caption after upload.
+    // Images only. Does not overwrite existing alt text.
+    // Silent — no notice, just copies.
+    // =========================================================================
+
+    public function server_copy_caption_to_alt( $post_id ) {
+
+        // Images only
+        $mime = get_post_mime_type( $post_id );
+        if ( strpos( $mime, 'image/' ) !== 0 ) {
+            return;
+        }
+
+        // Only copy if alt is currently empty
+        $current_alt = get_post_meta( $post_id, self::META_KEY, true );
+        if ( ! empty( $current_alt ) ) {
+            return;
+        }
+
+        // Get caption from post
+        $caption = get_post_field( 'post_excerpt', $post_id );
+        if ( empty( $caption ) ) {
+            return;
+        }
+
+        // Copy caption to alt
+        update_post_meta(
+            $post_id,
+            self::META_KEY,
+            sanitize_text_field( $caption )
+        );
+
+        // Clear "needs alt" flag — alt is now set
+        delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
     }
 
     // =========================================================================
@@ -725,6 +768,9 @@ jQuery( function( $ ) {
             tinyMCE.activeEditor &&
             ! tinyMCE.activeEditor.isHidden()
         ) {
+            // Force sync TinyMCE content to textarea before scanning
+            // Fixes multi-image case where content not yet synced at save time
+            tinyMCE.activeEditor.save();
             content = tinyMCE.activeEditor.getContent();
         } else {
             content = $( '#content' ).val() || '';
