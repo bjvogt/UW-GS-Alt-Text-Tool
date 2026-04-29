@@ -579,58 +579,204 @@ class UWGS_Alt_Text_Tool {
     // LIST VIEW ASSETS
     // =========================================================================
 
-    private function enqueue_list_view_assets() {
+private function enqueue_list_view_assets() {
 
-        $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-alt-new-flag                  {
-                display:inline-block; margin-left:4px; font-size:11px;
-                background:#fff3cd; color:#856404; border:1px solid #ffc107;
-                border-radius:3px; padding:1px 5px; vertical-align:middle;
-            }.uwgs-alt-edit-btn                  {
-                cursor:pointer; text-decoration:underline; color:#2271b1;
-                margin-left:6px; font-size:12px; background:none; border:none; padding:0;
-            }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
-        ';
+    $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-alt-new-flag                  {
+            display:inline-block; margin-left:4px; font-size:11px;
+            background:#fff3cd; color:#856404; border:1px solid #ffc107;
+            border-radius:3px; padding:1px 5px; vertical-align:middle;
+        }.uwgs-alt-edit-btn                  {
+            cursor:pointer; text-decoration:underline; color:#2271b1;
+            margin-left:6px; font-size:12px; background:none; border:none; padding:0;
+        }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
+    ';
 
-        wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
-        wp_enqueue_style( 'uwgs-alt-text-tool' );
-        wp_add_inline_style( 'uwgs-alt-text-tool', $css );
+    wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
+    wp_enqueue_style( 'uwgs-alt-text-tool' );
+    wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        $data = array(
-            'ajaxUrl' => admin_url( 'admin-ajax.php' ),
-            'i18n'    => array(
-                'saveFailed'    => __( 'Save failed. Please try again.', 'uwgs-alt-text-tool' ),
-                'requestFailed' => __( 'Request failed. Please try again.', 'uwgs-alt-text-tool' ),
-                'saved'         => __( 'Saved.', 'uwgs-alt-text-tool' ),
-                'blank'         => __( '(blank)', 'uwgs-alt-text-tool' ),
-            ),
-        );
+    // Build per-attachment suggestion data: caption first, then filename
+    // Only for images currently visible in the list view
+    $suggestions = array();
 
-        wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
+    // Get all image attachment IDs currently in the query
+    // We read from the global $wp_query which is already filtered/paginated
+    global $wp_query;
+    if ( $wp_query && ! empty( $wp_query->posts ) ) {
+        foreach ( $wp_query->posts as $attachment ) {
+            $post_id  = is_object( $attachment ) ? $attachment->ID : (int) $attachment;
+            $mime     = get_post_mime_type( $post_id );
 
-        $js = <<<'JS'
+            if ( strpos( $mime, 'image/' ) !== 0 ) { continue; }
+
+            $alt     = get_post_meta( $post_id, self::META_KEY, true );
+
+            // Only provide suggestion if alt is currently empty
+            if ( ! empty( $alt ) ) { continue; }
+
+            $caption  = get_post_field( 'post_excerpt', $post_id );
+            $filename = get_the_title( $post_id ); // WP stores original filename as title
+
+            // Prefer caption if present
+            if ( ! empty( trim( $caption ) ) ) {
+                $suggestions[ $post_id ] = array(
+                    'type'  => 'caption',
+                    'value' => sanitize_text_field( $caption ),
+                );
+            } else {
+                // Fall back to sanitized filename
+                $suggestions[ $post_id ] = array(
+                    'type'  => 'filename',
+                    'value' => sanitize_text_field( $filename ),
+                );
+            }
+        }
+    }
+
+    $data = array(
+        'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
+        'suggestions' => $suggestions,
+        'i18n'        => array(
+            'saveFailed'         => __( 'Save failed. Please try again.', 'uwgs-alt-text-tool' ),
+            'requestFailed'      => __( 'Request failed. Please try again.', 'uwgs-alt-text-tool' ),
+            'saved'              => __( 'Saved.', 'uwgs-alt-text-tool' ),
+            'blank'              => __( '(blank)', 'uwgs-alt-text-tool' ),
+            'fromCaption'        => __( 'Suggested from caption — please review', 'uwgs-alt-text-tool' ),
+            'fromFilename'       => __( 'Suggested from filename — please review', 'uwgs-alt-text-tool' ),
+        ),
+    );
+
+    wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
+
+    $js = <<<'JS'
 jQuery( function( $ ) {
 
-    var data    = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
-    var ajaxUrl = data.ajaxUrl || '';
-    var i18n    = data.i18n   || {};
+    var data        = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
+    var ajaxUrl     = data.ajaxUrl     || '';
+    var suggestions = data.suggestions || {};
+    var i18n        = data.i18n        || {};
+
+    // -----------------------------------------------------------------
+    // FILENAME SANITIZATION
+    // Applied client-side to the raw filename value passed from PHP.
+    // Rules:
+    //   1. Strip file extension
+    //   2. Replace - and _ with spaces
+    //   3. Remove 8-digit date patterns (YYYYMMDD starting with 19xx/20xx)
+    //   4. Remove 4-digit year patterns (1900-2099)
+    //   5. Remove WP size suffixes: 'scaled', NNNxNNN patterns
+    //   6. Remove isolated short numeric fragments (1-2 digits alone)
+    //   7. Collapse whitespace, trim
+    //   8. Title case
+    // -----------------------------------------------------------------
+
+    function sanitizeFilename( raw ) {
+        var s = raw;
+
+        // 1. Strip extension
+        s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
+
+        // 2. Replace hyphens and underscores with spaces
+        s = s.replace( /[-_]+/g, ' ' );
+
+        // 3. Remove 8-digit date patterns (YYYYMMDD: 19xxxxxx or 20xxxxxx)
+        s = s.replace( /\b(19|20)\d{6}\b/g, '' );
+
+        // 4. Remove standalone 4-digit years (1900-2099)
+        s = s.replace( /\b(19|20)\d{2}\b/g, '' );
+
+        // 5. Remove 'scaled' (WP large image suffix)
+        s = s.replace( /\bscaled\b/gi, '' );
+
+        // 6. Remove WP thumbnail size patterns: NNNxNNN or NNNxNNN-2 etc.
+        s = s.replace( /\b\d+x\d+\b/gi, '' );
+
+        // 7. Remove isolated 1-2 digit numbers (size variants like -5-, -2-)
+        //    but preserve longer numbers like catalogue/reference numbers (088)
+        s = s.replace( /\b\d{1,2}\b/g, '' );
+
+        // 8. Collapse multiple spaces and trim
+        s = s.replace( /\s{2,}/g, ' ' ).trim();
+
+        // 9. Title case: capitalize first letter of each word
+        s = s.replace( /\b\w/g, function( c ) { return c.toUpperCase(); } );
+
+        return s;
+    }
+
+    // -----------------------------------------------------------------
+    // OPEN INLINE EDITOR
+    // Pre-populate input with suggestion if alt is currently empty.
+    // Show a small hint below the input indicating the source.
+    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
-        var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
-        $wrap.find( '.uwgs-alt-display' ).hide();
+        var $wrap   = $( this ).closest( '.uwgs-alt-wrap' );
+        var postId  = $wrap.data( 'post-id' );
         var $editor = $wrap.find( '.uwgs-alt-editor' );
+        var $input  = $editor.find( '.uwgs-alt-input' );
+
+        $wrap.find( '.uwgs-alt-display' ).hide();
         $editor.show();
-        $editor.find( '.uwgs-alt-input' ).trigger( 'focus' );
+
+        // Remove any existing suggestion hint
+        $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
+
+        // Only pre-populate if input is currently empty
+        if ( $input.val().trim() === '' && suggestions[ postId ] ) {
+            var suggestion = suggestions[ postId ];
+            var value      = suggestion.value;
+
+            // Apply filename sanitization if sourced from filename
+            if ( suggestion.type === 'filename' ) {
+                value = sanitizeFilename( value );
+            }
+
+            if ( value ) {
+                $input.val( value );
+
+                // Show hint text below input
+                var hintText = suggestion.type === 'caption'
+                    ? ( i18n.fromCaption || 'Suggested from caption — please review' )
+                    : ( i18n.fromFilename || 'Suggested from filename — please review' );
+
+                var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( {
+                        'margin':    '4px 0 0',
+                        'font-size': '11px',
+                        'color':     '#856404',
+                        'font-style':'italic',
+                    } ).text( hintText );
+
+                $editor.find( '.uwgs-alt-input' ).after( $hint );
+
+                // Clear hint when editor starts typing
+                $input.one( 'input', function() {
+                    $hint.remove();
+                } );
+            }
+        }
+
+        $input.trigger( 'focus' );
         $( this ).attr( 'aria-expanded', 'true' );
     } );
+
+    // -----------------------------------------------------------------
+    // CANCEL INLINE EDITOR
+    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-cancel-btn', function() {
         var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
         $wrap.find( '.uwgs-alt-editor' ).hide();
+        $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
         var $display = $wrap.find( '.uwgs-alt-display' );
         $display.show();
         $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
         $wrap.find( '.uwgs-alt-feedback' ).text( '' ).removeClass( 'success error' );
     } );
+
+    // -----------------------------------------------------------------
+    // KEYBOARD: Enter saves, Escape cancels
+    // -----------------------------------------------------------------
 
     $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
         if ( 13 === e.which ) {
@@ -641,6 +787,10 @@ jQuery( function( $ ) {
             $( this ).closest( '.uwgs-alt-wrap' ).find( '.uwgs-alt-cancel-btn' ).trigger( 'click' );
         }
     } );
+
+    // -----------------------------------------------------------------
+    // SAVE VIA AJAX
+    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
         var $btn      = $( this );
@@ -657,27 +807,46 @@ jQuery( function( $ ) {
 
         $.ajax( {
             url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: postId, alt_text: altText, nonce: nonce },
+            data: {
+                action:   'uwgs_save_alt_text',
+                post_id:  postId,
+                alt_text: altText,
+                nonce:    nonce,
+            },
             success: function( response ) {
                 if ( response.success ) {
                     var $display = $wrap.find( '.uwgs-alt-display' );
                     var $value   = $display.find( '.uwgs-alt-value' );
+
                     if ( altText.length ) {
                         $value.text( altText ).removeClass( 'uwgs-alt-blank' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
                         $wrap.find( '.uwgs-alt-new-flag' ).remove();
+
+                        // Remove this attachment from suggestions
+                        // so re-opening edit doesn't re-suggest
+                        delete suggestions[ postId ];
+
                     } else {
                         $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
                     }
+
                     $wrap.find( '.uwgs-alt-editor' ).hide();
+                    $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
                     $display.show();
                     $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
+
                     $feedback.text( i18n.saved || 'Saved.' ).addClass( 'success' );
-                    setTimeout( function() { $feedback.text( '' ).removeClass( 'success' ); }, 3000 );
+                    setTimeout( function() {
+                        $feedback.text( '' ).removeClass( 'success' );
+                    }, 3000 );
+
                 } else {
                     $feedback.text( response.data || i18n.saveFailed ).addClass( 'error' );
                 }
             },
-            error: function() { $feedback.text( i18n.requestFailed ).addClass( 'error' ); },
+            error: function() {
+                $feedback.text( i18n.requestFailed ).addClass( 'error' );
+            },
             complete: function() {
                 $btn.prop( 'disabled', false );
                 $spinner.removeClass( 'is-active' ).attr( 'aria-hidden', 'true' );
@@ -688,8 +857,8 @@ jQuery( function( $ ) {
 } );
 JS;
 
-        wp_add_inline_script( 'jquery', $js );
-    }
+    wp_add_inline_script( 'jquery', $js );
+}
 
     // =========================================================================
     // UPLOAD PAGE ASSETS
