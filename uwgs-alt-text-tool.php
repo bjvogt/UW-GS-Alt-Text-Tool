@@ -7,7 +7,7 @@
  *                    save/publish time in both classic and block editors. Copies caption to alt text
  *                    with notice on attachment edit screen and in the Add Media modal. Updates upload
  *                    status messages to prompt alt text entry. Built for UW Graduate School.
- * Version:           1.8.0
+ * Version:           1.8.5
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -852,6 +852,182 @@ private function enqueue_media_modal_caption_assets() {
             // Short delay to allow Backbone to finish rendering field values
             setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
         } );
+    }
+
+    // -------------------------------------------------------------------------
+    // Classic editor: pre-save TinyMCE content scan
+    // -------------------------------------------------------------------------
+
+    private function enqueue_classic_presave_assets() {
+
+        $css = '
+            #uwgs-presave-warning {
+                display:none;
+                position:fixed;
+                top:32px;
+                left:50%;
+                transform:translateX(-50%);
+                z-index:99999;
+                min-width:320px;
+                max-width:560px;
+                padding:14px 18px;
+                background:#fff3cd;
+                border:2px solid #ffc107;
+                border-radius:4px;
+                color:#856404;
+                font-size:13px;
+                line-height:1.6;
+                box-shadow:0 4px 12px rgba(0,0,0,0.15);
+            }
+            #uwgs-presave-warning.visible { display:block; }
+            #uwgs-presave-warning strong  { display:block; margin-bottom:6px; font-size:14px; }
+            #uwgs-presave-warning ul      { margin:6px 0 10px 18px; padding:0; }
+            #uwgs-presave-warning.uwgs-warning-actions {
+                margin-top:10px; display:flex; gap:8px; align-items:center;
+            }
+        ';
+
+        wp_register_style( 'uwgs-classic-presave', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-classic-presave' );
+        wp_add_inline_style( 'uwgs-classic-presave', $css );
+
+        $i18n = array(
+            'warningTitle' => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
+            'warningIntro' => __( 'The following images in this post have no alt text. Please go back and add descriptions, or click "Save anyway" if they are decorative.', 'uwgs-alt-text-tool' ),
+            'saveAnyway'   => __( 'Save anyway', 'uwgs-alt-text-tool' ),
+            'goBack'       => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
+            'unknownImage' => __( '(image without filename)', 'uwgs-alt-text-tool' ),
+        );
+
+        wp_add_inline_script(
+            'jquery',
+            'var uwgsPresaveI18n = '. wp_json_encode( $i18n ). ';'
+        );
+
+        $js = <<<'JS'
+jQuery( function( $ ) {
+
+    'use strict';
+
+    var i18n       = ( typeof uwgsPresaveI18n !== 'undefined' ) ? uwgsPresaveI18n : {};
+    var $warning   = null;
+    var saveTarget = null;
+
+    $warning = $( '<div>' ).attr( {
+            'id':         'uwgs-presave-warning',
+            'role':       'alertdialog',
+            'aria-live':  'assertive',
+            'aria-modal': 'false',
+            'tabindex':   '-1',
+        } );
+
+    $( 'body' ).append( $warning );
+
+    function scanForMissingAlt() {
+        var missing = [];
+        var content = '';
+
+        if (
+            typeof window.tinyMCE !== 'undefined' &&
+            tinyMCE.activeEditor &&
+            ! tinyMCE.activeEditor.isHidden()
+        ) {
+            content = tinyMCE.activeEditor.getContent();
+        } else {
+            content = $( '#content' ).val() || '';
+        }
+
+        if ( ! content ) { return missing; }
+
+        var $parsed = $( '<div>' ).html( content );
+
+        $parsed.find( 'img' ).each( function() {
+            var alt = ( $( this ).attr( 'alt' ) || '' ).trim();
+            if ( alt === '' ) {
+                var src      = $( this ).attr( 'src' ) || '';
+                var parts    = src.split( '/' );
+                var filename = parts[ parts.length - 1 ] || '';
+                filename = filename.split( '?' )[0];
+                filename = filename.replace( /-\d+x\d+(\.\w+)$/, '$1' );
+                missing.push( filename || i18n.unknownImage || '(image without filename)' );
+            }
+        } );
+
+        return missing;
+    }
+
+    function showWarning( missing ) {
+        $warning.empty();
+
+        var $title = $( '<strong>' ).text( i18n.warningTitle || '⚠ Images missing alt text' );
+        var $intro = $( '<p>' ).css( 'margin', '0 0 6px' ).text( i18n.warningIntro || 'The following images have no alt text:' );
+
+        var $list = $( '<ul>' );
+        missing.forEach( function( filename ) {
+            $list.append( $( '<li>' ).text( filename ) );
+        } );
+
+        var $actions = $( '<div>' ).addClass( 'uwgs-warning-actions' );
+
+        var $goBack = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button button-primary' ).text( i18n.goBack || 'Go back and fix' ).on( 'click', function() {
+                hideWarning();
+                if (
+                    typeof window.tinyMCE !== 'undefined' &&
+                    tinyMCE.activeEditor
+                ) {
+                    tinyMCE.activeEditor.focus();
+                }
+            } );
+
+        var $saveAnyway = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button' ).text( i18n.saveAnyway || 'Save anyway' ).on( 'click', function() {
+                hideWarning();
+                if ( saveTarget ) {
+                    $( saveTarget ).off( 'click.uwgsPresave' ).trigger( 'click' );
+                }
+            } );
+
+        $actions.append( $goBack ).append( $saveAnyway );
+        $warning.append( $title ).append( $intro ).append( $list ).append( $actions );
+        $warning.addClass( 'visible' );
+        $warning.trigger( 'focus' );
+    }
+
+    function hideWarning() {
+        $warning.removeClass( 'visible' ).empty();
+        saveTarget = null;
+    }
+
+    var saveSelectors = [
+        '#publish',
+        '#save-post',
+        'input[name="save"]',
+        'input[name="publish"]',
+    ].join( ', ' );
+
+    $( document ).on( 'click.uwgsPresave', saveSelectors, function( e ) {
+        if ( $warning.hasClass( 'visible' ) ) { return true; }
+        if ( $( this ).closest( '#autosave,.inline-edit-row' ).length ) { return true; }
+
+        var missing = scanForMissingAlt();
+        if ( ! missing.length ) { return true; }
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        saveTarget = this;
+        showWarning( missing );
+        return false;
+    } );
+
+    $( document ).on( 'keydown.uwgsPresave', function( e ) {
+        if ( 27 === e.which && $warning.hasClass( 'visible' ) ) {
+            hideWarning();
+        }
+    } );
+
+} );
+JS;
+
+        wp_add_inline_script( 'jquery', $js, 'after' );
     }
 
     /**
