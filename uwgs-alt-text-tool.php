@@ -674,7 +674,7 @@ jQuery( function( $ ) {
     var $warning = $( '<div>' ).addClass( 'uwgs-attachment-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).text( i18n.warningText || '⚠ This image has no alt text. Please add a description or click Save again to proceed.' );
 
     // Insert warning after notice (if present) or after alt field
-    $altField.closest( 'tr,.compat-field-alt,.form-field' ).after( $warning );
+    $altField.after( $warning );
 
     $altField.on( 'input', function() {
         if ( $( this ).val().trim().length ) {
@@ -716,18 +716,18 @@ JS;
     // Uses MutationObserver — no Backbone or wp.media timing dependency.
     // -------------------------------------------------------------------------
 
-    private function enqueue_media_modal_caption_assets() {
+private function enqueue_media_modal_caption_assets() {
 
-        $i18n = array(
-            'captionCopied' => __( 'Copied from caption — please review before inserting.', 'uwgs-alt-text-tool' ),
-        );
+    $i18n = array(
+        'captionCopied' => __( 'Copied from caption — please review before inserting.', 'uwgs-alt-text-tool' ),
+    );
 
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';'
-        );
+    wp_add_inline_script(
+        'jquery',
+        'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';'
+    );
 
-        $js = <<<'JS'
+    $js = <<<'JS'
 ( function() {
 
     'use strict';
@@ -735,26 +735,25 @@ JS;
     var i18n = ( typeof uwgsModalCapI18n !== 'undefined' ) ? uwgsModalCapI18n : {};
 
     /**
-     * Given an attachment details panel element,
-     * copy caption to alt if alt is empty and caption has a value.
-     * Show a small review notice below the alt field.
+     * Apply caption-to-alt copy on a confirmed details panel.
+     * Uses confirmed field IDs from DOM inspection:
+     *   Alt:     #attachment-details-alt-text     (TEXTAREA)
+     *   Caption: #attachment-details-caption      (TEXTAREA)
      */
     function applyCaptionToAlt( panel ) {
         if ( ! panel ) { return; }
 
-        // Alt field: standard wp.media selector
-        var altField = panel.querySelector(
-            '[data-setting="alt"] input, ' +
-            '.setting[data-setting="alt"] input, ' +
-            'input[data-setting="alt"]'
-        );
+        // Use confirmed IDs first, fall back to broader selectors
+        var altField = panel.querySelector( '#attachment-details-alt-text' )
+                    || panel.querySelector( 'textarea[id*="alt-text"]' )
+                    || panel.querySelector( '.setting.alt-text textarea' )
+                    || panel.querySelector( '[data-setting="alt"] textarea' )
+                    || panel.querySelector( '[data-setting="alt"] input' );
 
-        // Caption field: standard wp.media selector
-        var capField = panel.querySelector(
-            '[data-setting="caption"] textarea, ' +
-            '[data-setting="caption"] input, ' +
-            '.setting[data-setting="caption"] textarea'
-        );
+        var capField = panel.querySelector( '#attachment-details-caption' )
+                    || panel.querySelector( 'textarea[id*="caption"]' )
+                    || panel.querySelector( '[data-setting="caption"] textarea' )
+                    || panel.querySelector( '[data-setting="caption"] input' );
 
         if ( ! altField || ! capField ) { return; }
 
@@ -764,18 +763,18 @@ JS;
         // Only copy if alt is empty and caption has a value
         if ( altVal !== '' || capVal === '' ) { return; }
 
-        // Don't apply twice to the same panel
-        if ( panel.getAttribute( 'data-uwgs-cap-applied' ) ) { return; }
-        panel.setAttribute( 'data-uwgs-cap-applied', '1' );
+        // Don't apply twice to the same panel instance
+        if ( altField.getAttribute( 'data-uwgs-cap-applied' ) ) { return; }
+        altField.setAttribute( 'data-uwgs-cap-applied', '1' );
 
         // Set alt field value
         altField.value = capVal;
 
-        // Trigger change so Backbone model syncs
-        var event = new Event( 'change', { bubbles: true } );
-        altField.dispatchEvent( event );
+        // Trigger change so Backbone model syncs the value
+        altField.dispatchEvent( new Event( 'change', { bubbles: true } ) );
+        altField.dispatchEvent( new Event( 'input',  { bubbles: true } ) );
 
-        // Show review notice below alt field
+        // Show review notice below the alt field's parent.setting span
         var existing = panel.querySelector( '.uwgs-modal-cap-notice' );
         if ( existing ) { existing.remove(); }
 
@@ -801,10 +800,18 @@ JS;
         msg.textContent = i18n.captionCopied || 'Copied from caption — please review before inserting.';
 
         var dismiss = document.createElement( 'button' );
-        dismiss.type      = 'button';
+        dismiss.type        = 'button';
         dismiss.textContent = '✕';
         dismiss.setAttribute( 'aria-label', 'Dismiss' );
-        dismiss.style.cssText = 'background:none;border:none;cursor:pointer;color:#856404;font-size:12px;padding:0;flex-shrink:0;';
+        dismiss.style.cssText = [
+            'background:none',
+            'border:none',
+            'cursor:pointer',
+            'color:#856404',
+            'font-size:12px',
+            'padding:0',
+            'flex-shrink:0',
+        ].join( ';' );
         dismiss.addEventListener( 'click', function() {
             notice.remove();
         } );
@@ -812,33 +819,106 @@ JS;
         notice.appendChild( msg );
         notice.appendChild( dismiss );
 
-        // Insert after the alt field's parent setting div
-        var altSetting = altField.closest( '.setting, [data-setting="alt"]' );
+        // Insert after the.setting.alt-text span, or after the field itself
+        var altSetting = altField.closest( '.setting' );
         if ( altSetting && altSetting.parentNode ) {
             altSetting.parentNode.insertBefore( notice, altSetting.nextSibling );
         } else {
             altField.parentNode.insertBefore( notice, altField.nextSibling );
         }
 
-        // Remove notice when editor changes the alt field
+        // Remove notice and clear flag when editor changes the alt field
         altField.addEventListener( 'input', function() {
             notice.remove();
+            altField.removeAttribute( 'data-uwgs-cap-applied' );
         }, { once: true } );
     }
 
     /**
-     * Observe the media modal for attachment details panels appearing.
-     * Fires applyCaptionToAlt when a details panel is added or updated.
+     * Find all confirmed details panels in a container and process them.
+     * Confirmed class pattern from DOM inspection: 'attachment-details save-ready'
+     * Also handles 'attachment-details' alone for robustness.
      */
-    function observeMediaModal() {
+    function processPanels( container ) {
+        if ( ! container ) { return; }
 
-        // Watch document for the modal itself appearing
-        var docObserver = new MutationObserver( function( mutations ) {
+        // querySelectorAll with confirmed class — note: both classes must be present
+        var panels = container.querySelectorAll(
+            '.attachment-details.save-ready, ' +
+            '.attachment-details'
+        );
+
+        panels.forEach( function( panel ) {
+            // Short delay to allow Backbone to finish rendering field values
+            setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
+        } );
+    }
+
+    /**
+     * Observe a modal or frame container for details panels appearing or changing.
+     * Targets confirmed container:.media-sidebar.visible >.attachment-details.save-ready
+     */
+    function observeModalContent( modal ) {
+        if ( ! modal || modal._uwgsObserved ) { return; }
+        modal._uwgsObserved = true;
+
+        // Process any panels already present
+        processPanels( modal );
+
+        var observer = new MutationObserver( function( mutations ) {
+            mutations.forEach( function( mutation ) {
+
+                // New nodes added anywhere in the modal
+                mutation.addedNodes.forEach( function( node ) {
+                    if ( node.nodeType !== 1 ) { return; }
+
+                    // Node itself is a details panel
+                    if (
+                        node.classList &&
+                        node.classList.contains( 'attachment-details' )
+                    ) {
+                        setTimeout( function() { applyCaptionToAlt( node ); }, 200 );
+                        return;
+                    }
+
+                    // Node contains details panels
+                    processPanels( node );
+                } );
+
+                // Existing node content changed — re-check if it's inside a panel
+                // This catches Backbone re-rendering field values after selection
+                if ( mutation.type === 'childList' && mutation.target ) {
+                    var panel = mutation.target.closest
+                        ? mutation.target.closest( '.attachment-details' )
+                        : null;
+                    if ( panel ) {
+                        setTimeout( function() { applyCaptionToAlt( panel ); }, 200 );
+                    }
+                }
+            } );
+        } );
+
+        observer.observe( modal, {
+            childList: true,
+            subtree:   true,
+        } );
+    }
+
+    /**
+     * Watch document.body for the media modal appearing.
+     * Confirmed container classes:.media-modal,.media-frame
+     */
+    function observeForModal() {
+
+        // Handle modals already in DOM
+        document.querySelectorAll( '.media-modal,.media-frame' ).forEach( observeModalContent );
+
+        // Watch for modals added dynamically
+        var bodyObserver = new MutationObserver( function( mutations ) {
             mutations.forEach( function( mutation ) {
                 mutation.addedNodes.forEach( function( node ) {
                     if ( node.nodeType !== 1 ) { return; }
 
-                    // Modal container added
                     if (
                         node.classList && (
                             node.classList.contains( 'media-modal' ) ||
@@ -846,263 +926,31 @@ JS;
                         )
                     ) {
                         observeModalContent( node );
+                        return;
                     }
 
-                    // Or check descendants
-                    var modals = node.querySelectorAll
-                        ? node.querySelectorAll( '.media-modal,.media-frame' )
-                        : [];
-                    modals.forEach( observeModalContent );
+                    node.querySelectorAll && node.querySelectorAll( '.media-modal,.media-frame' ).forEach( observeModalContent );
                 } );
             } );
         } );
 
-        docObserver.observe( document.body, { childList: true, subtree: true } );
-
-        // Also handle modal already in DOM (e.g. media library page)
-        document.querySelectorAll( '.media-modal,.media-frame' ).forEach( observeModalContent );
-    }
-
-    /**
-     * Observe a media modal/frame for attachment details panels.
-     */
-    function observeModalContent( modal ) {
-        if ( ! modal || modal._uwgsObserved ) { return; }
-        modal._uwgsObserved = true;
-
-        var modalObserver = new MutationObserver( function( mutations ) {
-            mutations.forEach( function( mutation ) {
-                mutation.addedNodes.forEach( function( node ) {
-                    if ( node.nodeType !== 1 ) { return; }
-
-                    // Attachment details panel added directly
-                    if (
-                        node.classList && (
-                            node.classList.contains( 'attachment-details' ) ||
-                            node.classList.contains( 'attachment-info' )
-                        )
-                    ) {
-                        // Short delay to allow all fields to render
-                        setTimeout( function() { applyCaptionToAlt( node ); }, 150 );
-                    }
-
-                    // Or check descendants
-                    var panels = node.querySelectorAll
-                        ? node.querySelectorAll( '.attachment-details,.attachment-info' )
-                        : [];
-                    panels.forEach( function( panel ) {
-                        setTimeout( function() { applyCaptionToAlt( panel ); }, 150 );
-                    } );
-                } );
-
-                // Also handle attribute/content changes within existing panels
-                if (
-                    mutation.type === 'childList' &&
-                    mutation.target &&
-                    mutation.target.closest
-                ) {
-                    var panel = mutation.target.closest( '.attachment-details,.attachment-info' );
-                    if ( panel ) {
-                        setTimeout( function() { applyCaptionToAlt( panel ); }, 150 );
-                    }
-                }
-            } );
-        } );
-
-        modalObserver.observe( modal, {
+        bodyObserver.observe( document.body, {
             childList: true,
-            subtree:   true,
+            subtree:   false, // Only watch direct children of body for performance
         } );
     }
 
-    // Start observing when DOM is ready
     if ( document.readyState === 'loading' ) {
-        document.addEventListener( 'DOMContentLoaded', observeMediaModal );
+        document.addEventListener( 'DOMContentLoaded', observeForModal );
     } else {
-        observeMediaModal();
+        observeForModal();
     }
 
 } )();
 JS;
 
-        wp_add_inline_script( 'jquery', $js, 'after' );
-    }
-
-    // -------------------------------------------------------------------------
-    // Classic editor: pre-save TinyMCE content scan
-    // -------------------------------------------------------------------------
-
-    private function enqueue_classic_presave_assets() {
-
-        $css = '
-            #uwgs-presave-warning {
-                display:none;
-                position:fixed;
-                top:32px;
-                left:50%;
-                transform:translateX(-50%);
-                z-index:99999;
-                min-width:320px;
-                max-width:560px;
-                padding:14px 18px;
-                background:#fff3cd;
-                border:2px solid #ffc107;
-                border-radius:4px;
-                color:#856404;
-                font-size:13px;
-                line-height:1.6;
-                box-shadow:0 4px 12px rgba(0,0,0,0.15);
-            }
-            #uwgs-presave-warning.visible { display:block; }
-            #uwgs-presave-warning strong  { display:block; margin-bottom:6px; font-size:14px; }
-            #uwgs-presave-warning ul      { margin:6px 0 10px 18px; padding:0; }
-            #uwgs-presave-warning.uwgs-warning-actions {
-                margin-top:10px; display:flex; gap:8px; align-items:center;
-            }
-        ';
-
-        wp_register_style( 'uwgs-classic-presave', false, array(), self::VERSION );
-        wp_enqueue_style( 'uwgs-classic-presave' );
-        wp_add_inline_style( 'uwgs-classic-presave', $css );
-
-        $i18n = array(
-            'warningTitle' => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
-            'warningIntro' => __( 'The following images in this post have no alt text. Please go back and add descriptions, or click "Save anyway" if they are decorative.', 'uwgs-alt-text-tool' ),
-            'saveAnyway'   => __( 'Save anyway', 'uwgs-alt-text-tool' ),
-            'goBack'       => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
-            'unknownImage' => __( '(image without filename)', 'uwgs-alt-text-tool' ),
-        );
-
-        wp_add_inline_script(
-            'jquery',
-            'var uwgsPresaveI18n = '. wp_json_encode( $i18n ). ';'
-        );
-
-        $js = <<<'JS'
-jQuery( function( $ ) {
-
-    'use strict';
-
-    var i18n       = ( typeof uwgsPresaveI18n !== 'undefined' ) ? uwgsPresaveI18n : {};
-    var $warning   = null;
-    var saveTarget = null;
-
-    $warning = $( '<div>' ).attr( {
-            'id':         'uwgs-presave-warning',
-            'role':       'alertdialog',
-            'aria-live':  'assertive',
-            'aria-modal': 'false',
-            'tabindex':   '-1',
-        } );
-
-    $( 'body' ).append( $warning );
-
-    function scanForMissingAlt() {
-        var missing = [];
-        var content = '';
-
-        if (
-            typeof window.tinyMCE !== 'undefined' &&
-            tinyMCE.activeEditor &&
-            ! tinyMCE.activeEditor.isHidden()
-        ) {
-            content = tinyMCE.activeEditor.getContent();
-        } else {
-            content = $( '#content' ).val() || '';
-        }
-
-        if ( ! content ) { return missing; }
-
-        var $parsed = $( '<div>' ).html( content );
-
-        $parsed.find( 'img' ).each( function() {
-            var alt = ( $( this ).attr( 'alt' ) || '' ).trim();
-            if ( alt === '' ) {
-                var src      = $( this ).attr( 'src' ) || '';
-                var parts    = src.split( '/' );
-                var filename = parts[ parts.length - 1 ] || '';
-                filename = filename.split( '?' )[0];
-                filename = filename.replace( /-\d+x\d+(\.\w+)$/, '$1' );
-                missing.push( filename || i18n.unknownImage || '(image without filename)' );
-            }
-        } );
-
-        return missing;
-    }
-
-    function showWarning( missing ) {
-        $warning.empty();
-
-        var $title = $( '<strong>' ).text( i18n.warningTitle || '⚠ Images missing alt text' );
-        var $intro = $( '<p>' ).css( 'margin', '0 0 6px' ).text( i18n.warningIntro || 'The following images have no alt text:' );
-
-        var $list = $( '<ul>' );
-        missing.forEach( function( filename ) {
-            $list.append( $( '<li>' ).text( filename ) );
-        } );
-
-        var $actions = $( '<div>' ).addClass( 'uwgs-warning-actions' );
-
-        var $goBack = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button button-primary' ).text( i18n.goBack || 'Go back and fix' ).on( 'click', function() {
-                hideWarning();
-                if (
-                    typeof window.tinyMCE !== 'undefined' &&
-                    tinyMCE.activeEditor
-                ) {
-                    tinyMCE.activeEditor.focus();
-                }
-            } );
-
-        var $saveAnyway = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button' ).text( i18n.saveAnyway || 'Save anyway' ).on( 'click', function() {
-                hideWarning();
-                if ( saveTarget ) {
-                    $( saveTarget ).off( 'click.uwgsPresave' ).trigger( 'click' );
-                }
-            } );
-
-        $actions.append( $goBack ).append( $saveAnyway );
-        $warning.append( $title ).append( $intro ).append( $list ).append( $actions );
-        $warning.addClass( 'visible' );
-        $warning.trigger( 'focus' );
-    }
-
-    function hideWarning() {
-        $warning.removeClass( 'visible' ).empty();
-        saveTarget = null;
-    }
-
-    var saveSelectors = [
-        '#publish',
-        '#save-post',
-        'input[name="save"]',
-        'input[name="publish"]',
-    ].join( ', ' );
-
-    $( document ).on( 'click.uwgsPresave', saveSelectors, function( e ) {
-        if ( $warning.hasClass( 'visible' ) ) { return true; }
-        if ( $( this ).closest( '#autosave,.inline-edit-row' ).length ) { return true; }
-
-        var missing = scanForMissingAlt();
-        if ( ! missing.length ) { return true; }
-
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        saveTarget = this;
-        showWarning( missing );
-        return false;
-    } );
-
-    $( document ).on( 'keydown.uwgsPresave', function( e ) {
-        if ( 27 === e.which && $warning.hasClass( 'visible' ) ) {
-            hideWarning();
-        }
-    } );
-
-} );
-JS;
-
-        wp_add_inline_script( 'jquery', $js, 'after' );
-    }
+    wp_add_inline_script( 'jquery', $js, 'after' );
+}
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
