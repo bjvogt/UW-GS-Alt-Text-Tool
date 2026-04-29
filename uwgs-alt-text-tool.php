@@ -9,7 +9,7 @@
  *                    caption to alt text server-side on attachment save and in the Add Media modal.
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.1.1
+ * Version:           2.1.3
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -30,14 +30,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.1.2';
-
-    /**
-     * Post types that use a custom save mechanism incompatible with our
-     * standard presave scan. These get popup-only warning (no inline notice bar,
-     * no TinyMCE scan). Add slugs here as needed.
-     */
-    const CUSTOM_SAVE_POST_TYPES = array( 'uw_stories' );
+    const VERSION         = '2.1.3';
 
     public static function init() {
         $instance = new self();
@@ -77,20 +70,6 @@ class UWGS_Alt_Text_Tool {
 
         // Gutenberg: block canvas warning + pre-publish panel
         add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_block_editor_assets' ) );
-    }
-
-    // =========================================================================
-    // HELPERS
-    // =========================================================================
-
-    /**
-     * Returns true if the current post edit screen is for a post type
-     * listed in CUSTOM_SAVE_POST_TYPES (e.g. uw_stories).
-     */
-    private function is_custom_save_post_type() {
-        global $post;
-        if ( ! $post ) { return false; }
-        return in_array( get_post_type( $post->ID ), self::CUSTOM_SAVE_POST_TYPES, true );
     }
 
     // =========================================================================
@@ -556,16 +535,11 @@ class UWGS_Alt_Text_Tool {
                 $this->enqueue_attachment_edit_assets( $post->ID );
             }
 
+            // All non-block-editor post types get the same presave treatment —
+            // including uw_stories. The inline notice bar gracefully falls back
+            // to document.body if #titlediv is absent.
             if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
-                if ( $this->is_custom_save_post_type() ) {
-                    // uw_stories and similar: popup-only, no TinyMCE scan,
-                    // no inline notice bar
-                    $this->enqueue_custom_post_type_presave_assets();
-                } else {
-                    // Standard posts, pages, and other custom post types:
-                    // full presave scan with inline notice bar
-                    $this->enqueue_classic_presave_assets();
-                }
+                $this->enqueue_classic_presave_assets();
             }
 
             if ( ! did_action( 'wp_enqueue_media' ) ) {
@@ -579,76 +553,64 @@ class UWGS_Alt_Text_Tool {
     // LIST VIEW ASSETS
     // =========================================================================
 
-private function enqueue_list_view_assets() {
+    private function enqueue_list_view_assets() {
 
-    $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-alt-new-flag                  {
-            display:inline-block; margin-left:4px; font-size:11px;
-            background:#fff3cd; color:#856404; border:1px solid #ffc107;
-            border-radius:3px; padding:1px 5px; vertical-align:middle;
-        }.uwgs-alt-edit-btn                  {
-            cursor:pointer; text-decoration:underline; color:#2271b1;
-            margin-left:6px; font-size:12px; background:none; border:none; padding:0;
-        }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
-    ';
+        $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-alt-new-flag                  {
+                display:inline-block; margin-left:4px; font-size:11px;
+                background:#fff3cd; color:#856404; border:1px solid #ffc107;
+                border-radius:3px; padding:1px 5px; vertical-align:middle;
+            }.uwgs-alt-edit-btn                  {
+                cursor:pointer; text-decoration:underline; color:#2271b1;
+                margin-left:6px; font-size:12px; background:none; border:none; padding:0;
+            }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
+        ';
 
-    wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
-    wp_enqueue_style( 'uwgs-alt-text-tool' );
-    wp_add_inline_style( 'uwgs-alt-text-tool', $css );
+        wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-alt-text-tool' );
+        wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-    // Build per-attachment suggestion data: caption first, then filename
-    // Only for images currently visible in the list view
-    $suggestions = array();
-
-    // Get all image attachment IDs currently in the query
-    // We read from the global $wp_query which is already filtered/paginated
-    global $wp_query;
-    if ( $wp_query && ! empty( $wp_query->posts ) ) {
-        foreach ( $wp_query->posts as $attachment ) {
-            $post_id  = is_object( $attachment ) ? $attachment->ID : (int) $attachment;
-            $mime     = get_post_mime_type( $post_id );
-
-            if ( strpos( $mime, 'image/' ) !== 0 ) { continue; }
-
-            $alt     = get_post_meta( $post_id, self::META_KEY, true );
-
-            // Only provide suggestion if alt is currently empty
-            if ( ! empty( $alt ) ) { continue; }
-
-            $caption  = get_post_field( 'post_excerpt', $post_id );
-            $filename = get_the_title( $post_id ); // WP stores original filename as title
-
-            // Prefer caption if present
-            if ( ! empty( trim( $caption ) ) ) {
-                $suggestions[ $post_id ] = array(
-                    'type'  => 'caption',
-                    'value' => sanitize_text_field( $caption ),
-                );
-            } else {
-                // Fall back to sanitized filename
-                $suggestions[ $post_id ] = array(
-                    'type'  => 'filename',
-                    'value' => sanitize_text_field( $filename ),
-                );
+        // Build per-attachment suggestion data: caption first, then filename
+        $suggestions = array();
+        global $wp_query;
+        if ( $wp_query && ! empty( $wp_query->posts ) ) {
+            foreach ( $wp_query->posts as $attachment ) {
+                $post_id = is_object( $attachment ) ? $attachment->ID : (int) $attachment;
+                $mime    = get_post_mime_type( $post_id );
+                if ( strpos( $mime, 'image/' ) !== 0 ) { continue; }
+                $alt = get_post_meta( $post_id, self::META_KEY, true );
+                if ( ! empty( $alt ) ) { continue; }
+                $caption  = get_post_field( 'post_excerpt', $post_id );
+                $filename = get_the_title( $post_id );
+                if ( ! empty( trim( $caption ) ) ) {
+                    $suggestions[ $post_id ] = array(
+                        'type'  => 'caption',
+                        'value' => sanitize_text_field( $caption ),
+                    );
+                } else {
+                    $suggestions[ $post_id ] = array(
+                        'type'  => 'filename',
+                        'value' => sanitize_text_field( $filename ),
+                    );
+                }
             }
         }
-    }
 
-    $data = array(
-        'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
-        'suggestions' => $suggestions,
-        'i18n'        => array(
-            'saveFailed'         => __( 'Save failed. Please try again.', 'uwgs-alt-text-tool' ),
-            'requestFailed'      => __( 'Request failed. Please try again.', 'uwgs-alt-text-tool' ),
-            'saved'              => __( 'Saved.', 'uwgs-alt-text-tool' ),
-            'blank'              => __( '(blank)', 'uwgs-alt-text-tool' ),
-            'fromCaption'        => __( 'Suggested from caption — please review', 'uwgs-alt-text-tool' ),
-            'fromFilename'       => __( 'Suggested from filename — please review', 'uwgs-alt-text-tool' ),
-        ),
-    );
+        $data = array(
+            'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
+            'suggestions' => $suggestions,
+            'i18n'        => array(
+                'saveFailed'    => __( 'Save failed. Please try again.', 'uwgs-alt-text-tool' ),
+                'requestFailed' => __( 'Request failed. Please try again.', 'uwgs-alt-text-tool' ),
+                'saved'         => __( 'Saved.', 'uwgs-alt-text-tool' ),
+                'blank'         => __( '(blank)', 'uwgs-alt-text-tool' ),
+                'fromCaption'   => __( 'Suggested from caption — please review', 'uwgs-alt-text-tool' ),
+                'fromFilename'  => __( 'Suggested from filename — please review', 'uwgs-alt-text-tool' ),
+            ),
+        );
 
-    wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
+        wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
 
-    $js = <<<'JS'
+        $js = <<<'JS'
 jQuery( function( $ ) {
 
     var data        = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
@@ -656,59 +618,19 @@ jQuery( function( $ ) {
     var suggestions = data.suggestions || {};
     var i18n        = data.i18n        || {};
 
-    // -----------------------------------------------------------------
-    // FILENAME SANITIZATION
-    // Applied client-side to the raw filename value passed from PHP.
-    // Rules:
-    //   1. Strip file extension
-    //   2. Replace - and _ with spaces
-    //   3. Remove 8-digit date patterns (YYYYMMDD starting with 19xx/20xx)
-    //   4. Remove 4-digit year patterns (1900-2099)
-    //   5. Remove WP size suffixes: 'scaled', NNNxNNN patterns
-    //   6. Remove isolated short numeric fragments (1-2 digits alone)
-    //   7. Collapse whitespace, trim
-    //   8. Title case
-    // -----------------------------------------------------------------
-
     function sanitizeFilename( raw ) {
         var s = raw;
-
-        // 1. Strip extension
         s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
-
-        // 2. Replace hyphens and underscores with spaces
         s = s.replace( /[-_]+/g, ' ' );
-
-        // 3. Remove 8-digit date patterns (YYYYMMDD: 19xxxxxx or 20xxxxxx)
         s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-
-        // 4. Remove standalone 4-digit years (1900-2099)
         s = s.replace( /\b(19|20)\d{2}\b/g, '' );
-
-        // 5. Remove 'scaled' (WP large image suffix)
         s = s.replace( /\bscaled\b/gi, '' );
-
-        // 6. Remove WP thumbnail size patterns: NNNxNNN or NNNxNNN-2 etc.
         s = s.replace( /\b\d+x\d+\b/gi, '' );
-
-        // 7. Remove isolated 1-2 digit numbers (size variants like -5-, -2-)
-        //    but preserve longer numbers like catalogue/reference numbers (088)
         s = s.replace( /\b\d{1,2}\b/g, '' );
-
-        // 8. Collapse multiple spaces and trim
         s = s.replace( /\s{2,}/g, ' ' ).trim();
-
-        // 9. Title case: capitalize first letter of each word
         s = s.replace( /\b\w/g, function( c ) { return c.toUpperCase(); } );
-
         return s;
     }
-
-    // -----------------------------------------------------------------
-    // OPEN INLINE EDITOR
-    // Pre-populate input with suggestion if alt is currently empty.
-    // Show a small hint below the input indicating the source.
-    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
         var $wrap   = $( this ).closest( '.uwgs-alt-wrap' );
@@ -718,51 +640,28 @@ jQuery( function( $ ) {
 
         $wrap.find( '.uwgs-alt-display' ).hide();
         $editor.show();
-
-        // Remove any existing suggestion hint
         $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
 
-        // Only pre-populate if input is currently empty
         if ( $input.val().trim() === '' && suggestions[ postId ] ) {
             var suggestion = suggestions[ postId ];
-            var value      = suggestion.value;
-
-            // Apply filename sanitization if sourced from filename
-            if ( suggestion.type === 'filename' ) {
-                value = sanitizeFilename( value );
-            }
+            var value      = suggestion.type === 'filename'
+                ? sanitizeFilename( suggestion.value )
+                : suggestion.value;
 
             if ( value ) {
                 $input.val( value );
-
-                // Show hint text below input
                 var hintText = suggestion.type === 'caption'
                     ? ( i18n.fromCaption || 'Suggested from caption — please review' )
                     : ( i18n.fromFilename || 'Suggested from filename — please review' );
-
-                var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( {
-                        'margin':    '4px 0 0',
-                        'font-size': '11px',
-                        'color':     '#856404',
-                        'font-style':'italic',
-                    } ).text( hintText );
-
-                $editor.find( '.uwgs-alt-input' ).after( $hint );
-
-                // Clear hint when editor starts typing
-                $input.one( 'input', function() {
-                    $hint.remove();
-                } );
+                var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( { 'margin': '4px 0 0', 'font-size': '11px', 'color': '#856404', 'font-style': 'italic' } ).text( hintText );
+                $input.after( $hint );
+                $input.one( 'input', function() { $hint.remove(); } );
             }
         }
 
         $input.trigger( 'focus' );
         $( this ).attr( 'aria-expanded', 'true' );
     } );
-
-    // -----------------------------------------------------------------
-    // CANCEL INLINE EDITOR
-    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-cancel-btn', function() {
         var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
@@ -774,10 +673,6 @@ jQuery( function( $ ) {
         $wrap.find( '.uwgs-alt-feedback' ).text( '' ).removeClass( 'success error' );
     } );
 
-    // -----------------------------------------------------------------
-    // KEYBOARD: Enter saves, Escape cancels
-    // -----------------------------------------------------------------
-
     $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
         if ( 13 === e.which ) {
             e.preventDefault();
@@ -787,10 +682,6 @@ jQuery( function( $ ) {
             $( this ).closest( '.uwgs-alt-wrap' ).find( '.uwgs-alt-cancel-btn' ).trigger( 'click' );
         }
     } );
-
-    // -----------------------------------------------------------------
-    // SAVE VIA AJAX
-    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
         var $btn      = $( this );
@@ -807,46 +698,29 @@ jQuery( function( $ ) {
 
         $.ajax( {
             url: ajaxUrl, type: 'POST',
-            data: {
-                action:   'uwgs_save_alt_text',
-                post_id:  postId,
-                alt_text: altText,
-                nonce:    nonce,
-            },
+            data: { action: 'uwgs_save_alt_text', post_id: postId, alt_text: altText, nonce: nonce },
             success: function( response ) {
                 if ( response.success ) {
                     var $display = $wrap.find( '.uwgs-alt-display' );
                     var $value   = $display.find( '.uwgs-alt-value' );
-
                     if ( altText.length ) {
                         $value.text( altText ).removeClass( 'uwgs-alt-blank' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
                         $wrap.find( '.uwgs-alt-new-flag' ).remove();
-
-                        // Remove this attachment from suggestions
-                        // so re-opening edit doesn't re-suggest
                         delete suggestions[ postId ];
-
                     } else {
                         $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
                     }
-
                     $wrap.find( '.uwgs-alt-editor' ).hide();
                     $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
                     $display.show();
                     $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
-
                     $feedback.text( i18n.saved || 'Saved.' ).addClass( 'success' );
-                    setTimeout( function() {
-                        $feedback.text( '' ).removeClass( 'success' );
-                    }, 3000 );
-
+                    setTimeout( function() { $feedback.text( '' ).removeClass( 'success' ); }, 3000 );
                 } else {
                     $feedback.text( response.data || i18n.saveFailed ).addClass( 'error' );
                 }
             },
-            error: function() {
-                $feedback.text( i18n.requestFailed ).addClass( 'error' );
-            },
+            error: function() { $feedback.text( i18n.requestFailed ).addClass( 'error' ); },
             complete: function() {
                 $btn.prop( 'disabled', false );
                 $spinner.removeClass( 'is-active' ).attr( 'aria-hidden', 'true' );
@@ -857,8 +731,8 @@ jQuery( function( $ ) {
 } );
 JS;
 
-    wp_add_inline_script( 'jquery', $js );
-}
+        wp_add_inline_script( 'jquery', $js );
+    }
 
     // =========================================================================
     // UPLOAD PAGE ASSETS
@@ -1022,16 +896,12 @@ JS;
     }
 
     // =========================================================================
-    // CLASSIC EDITOR PRESAVE: STANDARD POST TYPES
+    // CLASSIC EDITOR + ALL NON-BLOCK-EDITOR POST TYPES: PRE-SAVE SCAN
     //
-    // Full feature set:
-    // - Persistent inline notice bar (shown on load + after media insert)
-    // - Notice stays dismissed for session once editor clicks X
-    // - Re-appears only after new media is inserted
-    // - Pre-save popup warning with Go back / Save anyway
-    // - tinyMCE.triggerSave() for reliable content scan
-    // - Featured image AJAX check
-    // - Capture phase save button binding
+    // Applies to: posts, pages, custom post types including uw_stories.
+    // The inline notice bar anchors to #titlediv if present; falls back
+    // to document.body if absent (e.g. uw_stories has no #titlediv).
+    // The popup warning works regardless of post type DOM structure.
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -1057,8 +927,8 @@ JS;
             #uwgs-inline-notice.uwgs-notice-text { flex:1; }
             #uwgs-inline-notice.uwgs-notice-dismiss {
                 background:none; border:none; cursor:pointer;
-                color:#856404; font-size:16px; padding:0; flex-shrink:0;
-                line-height:1;
+                color:#856404; font-size:16px; padding:0;
+                flex-shrink:0; line-height:1;
             }
             #uwgs-inline-notice.uwgs-notice-dismiss:hover { color:#5a4000; }
             #uwgs-presave-warning {
@@ -1096,7 +966,6 @@ JS;
             ),
         );
 
-        // Output data as a direct script tag for reliable scope availability
         wp_add_inline_script( 'jquery', 'var uwgsPresaveData = '. wp_json_encode( $data ). ';' );
 
         $js = <<<'JS'
@@ -1109,14 +978,16 @@ JS;
     var nonce   = data.altCheckNonce || '';
     var i18n    = data.i18n          || {};
 
-    var warningEl    = null;
-    var noticeEl     = null;
-    var saveTarget   = null;
-    var saving       = false;
-    var noticeDismissed = false; // stays dismissed until new media inserted
+    var warningEl       = null;
+    var noticeEl        = null;
+    var saveTarget      = null;
+    var saving          = false;
+    var noticeDismissed = false;
 
     // -----------------------------------------------------------------
     // CONTENT SCAN
+    // Uses tinyMCE.triggerSave() to flush all editors before reading.
+    // Falls back to textarea for non-TinyMCE contexts (uw_stories etc).
     // -----------------------------------------------------------------
 
     function getPostContent() {
@@ -1178,11 +1049,10 @@ JS;
 
     // -----------------------------------------------------------------
     // INLINE NOTICE BAR
-    //
-    // - display:none set via CSS class absence (not inline style)
-    //   so toggling the class fully controls visibility
-    // - Stays dismissed (noticeDismissed = true) until new media inserted
-    // - Re-appears after media modal closes if new issues found
+    // Anchors to #titlediv if present (standard posts/pages).
+    // Falls back to document.body for post types without #titlediv
+    // (e.g. uw_stories) — appended to body, harmless if not visible.
+    // Stays dismissed until new media inserted or all issues resolved.
     // -----------------------------------------------------------------
 
     function buildNoticeBar() {
@@ -1202,10 +1072,11 @@ JS;
         dismissBtn.textContent = '✕';
         dismissBtn.addEventListener( 'click', function() {
             noticeEl.classList.remove( 'visible' );
-            noticeDismissed = true; // stay dismissed until new media
+            noticeDismissed = true;
         } );
         noticeEl.appendChild( dismissBtn );
 
+        // Anchor: prefer #titlediv (standard WP), fall back to body
         var anchor = document.getElementById( 'titlediv' )
                   || document.getElementById( 'post-body-content' );
         if ( anchor && anchor.parentNode ) {
@@ -1220,13 +1091,10 @@ JS;
 
         if ( ! hasContent && ! hasFeatured ) {
             noticeEl.classList.remove( 'visible' );
-            // Reset dismissed state when all issues resolved
             noticeDismissed = false;
             return;
         }
 
-        // Don't re-show if editor dismissed it this session
-        // (unless called from post-modal-close with resetDismissed = true)
         if ( noticeDismissed ) { return; }
 
         var textSpan = noticeEl.querySelector( '.uwgs-notice-text' );
@@ -1246,7 +1114,6 @@ JS;
     }
 
     function refreshNoticeBar( afterMediaInsert ) {
-        // After media insert: reset dismissed state so new issues are shown
         if ( afterMediaInsert ) { noticeDismissed = false; }
         var hasContent = contentHasMissingAlt();
         featuredImageMissingAlt().then( function( hasFeatured ) {
@@ -1326,6 +1193,8 @@ JS;
 
     // -----------------------------------------------------------------
     // SAVE BUTTON INTERCEPT — capture phase
+    // Runs both content scan (sync) and featured image check (async)
+    // in parallel. Neither can suppress the other.
     // -----------------------------------------------------------------
 
     function interceptSaveButtons() {
@@ -1353,13 +1222,12 @@ JS;
                     }
                 } );
 
-            }, true ); // capture phase
+            }, true ); // capture phase — fires before all other handlers
         } );
     }
 
     // -----------------------------------------------------------------
     // WATCH FOR MEDIA MODAL CLOSE — re-scan after insert
-    // Resets noticeDismissed so new issues from fresh inserts are shown
     // -----------------------------------------------------------------
 
     function watchForModalClose() {
@@ -1402,13 +1270,9 @@ JS;
             }
 
             // Immediate textarea scan on first attempt
-            if ( attempts === 1 ) {
-                refreshNoticeBar( false );
-            }
+            if ( attempts === 1 ) { refreshNoticeBar( false ); }
 
-            if ( attempts < maxAttempts ) {
-                setTimeout( attempt, 100 );
-            }
+            if ( attempts < maxAttempts ) { setTimeout( attempt, 100 ); }
         }
 
         attempt();
@@ -1434,199 +1298,6 @@ JS;
         interceptSaveButtons();
         watchForModalClose();
         waitForTinyMCEThenScan();
-    }
-
-} )();
-JS;
-
-        wp_add_inline_script( 'jquery', $js, 'after' );
-    }
-
-    // =========================================================================
-    // CUSTOM POST TYPE PRESAVE: uw_stories AND SIMILAR
-    //
-    // Popup warning only — no TinyMCE scan, no inline notice bar.
-    // Featured image check only (via AJAX).
-    // Capture phase save button binding.
-    // Data output as direct inline script for reliable scope availability.
-    // =========================================================================
-
-    private function enqueue_custom_post_type_presave_assets() {
-
-        $css = '
-            #uwgs-presave-warning {
-                display:none;
-                position:fixed; top:32px; left:50%; transform:translateX(-50%);
-                z-index:99999; min-width:320px; max-width:520px;
-                padding:16px 20px; background:#fff3cd; border:2px solid #ffc107;
-                border-radius:4px; color:#856404; font-size:13px; line-height:1.6;
-                box-shadow:0 4px 12px rgba(0,0,0,0.15);
-            }
-            #uwgs-presave-warning.visible { display:block; }
-            #uwgs-presave-warning strong  { display:block; margin-bottom:8px; font-size:14px; }
-            #uwgs-presave-warning p       { margin:0 0 12px; }
-            #uwgs-presave-warning.uwgs-warning-actions { display:flex; gap:8px; align-items:center; }
-        ';
-
-        wp_register_style( 'uwgs-cpt-presave', false, array(), self::VERSION );
-        wp_enqueue_style( 'uwgs-cpt-presave' );
-        wp_add_inline_style( 'uwgs-cpt-presave', $css );
-
-        $data = array(
-            'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
-            'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
-            'i18n'          => array(
-                'warningTitle'        => __( '⚠ Accessibility: Featured image missing alt text', 'uwgs-alt-text-tool' ),
-                'warningBodyFeatured' => __( 'The featured image for this post is missing alt text. Please edit the featured image and add a description, or click "Save anyway" if it is decorative.', 'uwgs-alt-text-tool' ),
-                'saveAnyway'          => __( 'Save anyway', 'uwgs-alt-text-tool' ),
-                'goBack'              => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
-            ),
-        );
-
-        // Direct inline script — not attached to jquery handle — ensures
-        // data is available regardless of script load order on custom post types
-        wp_add_inline_script( 'jquery', 'var uwgsCptData = '. wp_json_encode( $data ). ';' );
-
-        $js = <<<'JS'
-( function() {
-
-    'use strict';
-
-    var data    = ( typeof uwgsCptData !== 'undefined' ) ? uwgsCptData : {};
-    var ajaxUrl = data.ajaxUrl       || '';
-    var nonce   = data.altCheckNonce || '';
-    var i18n    = data.i18n          || {};
-
-    var warningEl  = null;
-    var saveTarget = null;
-    var saving     = false;
-
-    function buildWarningPanel() {
-        warningEl = document.createElement( 'div' );
-        warningEl.id = 'uwgs-presave-warning';
-        warningEl.setAttribute( 'role',       'alertdialog' );
-        warningEl.setAttribute( 'aria-live',  'assertive' );
-        warningEl.setAttribute( 'aria-modal', 'false' );
-        warningEl.setAttribute( 'tabindex',   '-1' );
-        document.body.appendChild( warningEl );
-    }
-
-    function showWarning() {
-        warningEl.innerHTML = '';
-
-        var title = document.createElement( 'strong' );
-        title.textContent = i18n.warningTitle || '⚠ Accessibility: Featured image missing alt text';
-
-        var body = document.createElement( 'p' );
-        body.textContent = i18n.warningBodyFeatured || 'The featured image is missing alt text.';
-
-        var actions = document.createElement( 'div' );
-        actions.className = 'uwgs-warning-actions';
-
-        var goBack = document.createElement( 'button' );
-        goBack.type = 'button'; goBack.className = 'button button-primary';
-        goBack.textContent = i18n.goBack || 'Go back and fix';
-        goBack.addEventListener( 'click', hideWarning );
-
-        var saveAnyway = document.createElement( 'button' );
-        saveAnyway.type = 'button'; saveAnyway.className = 'button';
-        saveAnyway.textContent = i18n.saveAnyway || 'Save anyway';
-        saveAnyway.addEventListener( 'click', function() {
-            hideWarning();
-            saving = true;
-            if ( saveTarget ) { saveTarget.click(); }
-        } );
-
-        actions.appendChild( goBack );
-        actions.appendChild( saveAnyway );
-        warningEl.appendChild( title );
-        warningEl.appendChild( body );
-        warningEl.appendChild( actions );
-        warningEl.classList.add( 'visible' );
-        warningEl.focus();
-    }
-
-    function hideWarning() {
-        warningEl.classList.remove( 'visible' );
-        warningEl.innerHTML = '';
-        saveTarget = null;
-        saving = false;
-    }
-
-    function getFeaturedImageId() {
-        var el = document.getElementById( '_thumbnail_id' );
-        if ( el ) {
-            var val = parseInt( el.value, 10 );
-            if ( val && val > 0 ) { return val; }
-        }
-        var candidates = document.querySelectorAll(
-            'input[type="hidden"][name*="thumbnail_id"],' +
-            'input[type="hidden"][id*="thumbnail_id"],' +
-            'input[type="hidden"][name*="featured_image"],' +
-            'input[type="hidden"][id*="featured_image"],' +
-            'input[type="hidden"][name*="featured_media"],' +
-            'input[type="hidden"][id*="featured_media"]'
-        );
-        for ( var i = 0; i < candidates.length; i++ ) {
-            var id = parseInt( candidates[i].value, 10 );
-            if ( id && id > 0 ) { return id; }
-        }
-        return 0;
-    }
-
-    function featuredImageMissingAlt() {
-        return new Promise( function( resolve ) {
-            var thumbnailId = getFeaturedImageId();
-            if ( ! thumbnailId ) { resolve( false ); return; }
-            var formData = new FormData();
-            formData.append( 'action',        'uwgs_get_attachment_alt' );
-            formData.append( 'nonce',         nonce );
-            formData.append( 'attachment_id', thumbnailId );
-            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) { resolve( response.success && ! response.data.has_alt ); } ).catch( function() { resolve( false ); } );
-        } );
-    }
-
-    function interceptSaveButtons() {
-        var saveIds = [ 'save', 'save-post', 'publish' ];
-        saveIds.forEach( function( id ) {
-            var btn = document.getElementById( id );
-            if ( ! btn ) { return; }
-
-            btn.addEventListener( 'click', function( e ) {
-                if ( saving ) { saving = false; return; }
-                if ( warningEl.classList.contains( 'visible' ) ) { return; }
-
-                e.preventDefault();
-                e.stopImmediatePropagation();
-                saveTarget = btn;
-
-                featuredImageMissingAlt().then( function( hasFeatured ) {
-                    if ( hasFeatured ) {
-                        showWarning();
-                    } else {
-                        saving = true;
-                        btn.click();
-                    }
-                } );
-
-            }, true ); // capture phase
-        } );
-    }
-
-    document.addEventListener( 'keydown', function( e ) {
-        if ( e.key === 'Escape' && warningEl && warningEl.classList.contains( 'visible' ) ) {
-            hideWarning();
-        }
-    } );
-
-    if ( document.readyState === 'loading' ) {
-        document.addEventListener( 'DOMContentLoaded', function() {
-            buildWarningPanel();
-            interceptSaveButtons();
-        } );
-    } else {
-        buildWarningPanel();
-        interceptSaveButtons();
     }
 
 } )();
@@ -1781,6 +1452,10 @@ JS;
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
+    //
+    // Fix in v2.1.3: added wp.data.subscribe to force the pre-publish
+    // panel to re-evaluate and open when issues are detected at publish
+    // time, regardless of whether the panel was previously mounted.
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1815,10 +1490,15 @@ JS;
         : ( wp.editPost ? wp.editPost.PluginPrePublishPanel : null );
 
     var useSelect = wp.data    ? wp.data.useSelect                     : null;
+    var subscribe = wp.data    ? wp.data.subscribe                     : null;
+    var dispatch  = wp.data    ? wp.data.dispatch                      : null;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
 
-    // Block canvas warning HOC
+    // -----------------------------------------------------------------
+    // BLOCK CANVAS WARNING HOC
+    // -----------------------------------------------------------------
+
     if ( addFilter && createHOC ) {
         var withAltWarning = createHOC( function( BlockEdit ) {
             return function( props ) {
@@ -1857,6 +1537,10 @@ JS;
 
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
+    // -----------------------------------------------------------------
+    // HELPER: check blocks recursively for missing alt text
+    // -----------------------------------------------------------------
+
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
@@ -1873,10 +1557,67 @@ JS;
         return false;
     }
 
+    // -----------------------------------------------------------------
+    // SUBSCRIBE: when the pre-publish panel opens, force it to show
+    // the correct open state by dispatching an editPost action.
+    //
+    // wp.data.subscribe fires on every store change. We watch for the
+    // pre-publish panel becoming active (isPublishSidebarOpened) and
+    // if we have issues, ensure our panel is open.
+    // -----------------------------------------------------------------
+
+    if ( subscribe && dispatch ) {
+        subscribe( function() {
+            var editorStore = wp.data.select( 'core/edit-post' )
+                           || wp.data.select( 'core/editor' );
+            if ( ! editorStore ) { return; }
+
+            // Only act when pre-publish sidebar is open
+            var sidebarOpen = editorStore.isPublishSidebarOpened
+                ? editorStore.isPublishSidebarOpened()
+                : false;
+
+            if ( ! sidebarOpen ) { return; }
+
+            // Check for issues
+            var blockEditorStore = wp.data.select( 'core/block-editor' );
+            if ( ! blockEditorStore ) { return; }
+
+            var blocks         = blockEditorStore.getBlocks();
+            var contentMissing = hasImageBlocksMissingAlt( blocks );
+
+            var featuredId = wp.data.select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
+            var featuredMissing = false;
+            if ( featuredId && featuredId > 0 ) {
+                var media = wp.data.select( 'core' ).getMedia( featuredId, { context: 'edit' } );
+                if ( media ) {
+                    featuredMissing = ( media.alt_text || '' ).trim() === '';
+                }
+            }
+
+            if ( contentMissing || featuredMissing ) {
+                // Open our specific panel via editPost dispatch
+                var editPostDispatch = wp.data.dispatch( 'core/edit-post' );
+                if ( editPostDispatch && editPostDispatch.toggleEditorPanelOpened ) {
+                    // Only open if not already open
+                    var panelId = 'uwgs-alt-text-panel/uwgs-alt-text-panel';
+                    var isOpen  = editorStore.isEditorPanelOpened
+                        ? editorStore.isEditorPanelOpened( panelId )
+                        : false;
+                    if ( ! isOpen ) {
+                        editPostDispatch.toggleEditorPanelOpened( panelId );
+                    }
+                }
+            }
+        } );
+    }
+
+    // -----------------------------------------------------------------
+    // PRE-PUBLISH PANEL COMPONENT
+    // -----------------------------------------------------------------
+
     function UWGSAltTextPanel() {
 
-        // Separate reactive useSelect calls — no dependency array
-        // means re-evaluates on every render, keeping state fresh
         var contentMissing = useSelect( function( select ) {
             var blocks = select( 'core/block-editor' ).getBlocks();
             return hasImageBlocksMissingAlt( blocks );
