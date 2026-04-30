@@ -9,7 +9,7 @@
  *                    caption to alt text server-side on attachment save and in the Add Media modal.
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.2.1
+ * Version:           2.3.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -30,7 +30,16 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ALT_CHECK = 'uwgs_get_attachment_alt';
     const META_KEY        = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY   = '_uwgs_needs_alt';
-    const VERSION         = '2.1.3';
+    const VERSION         = '2.3.0';
+
+    /**
+     * Generic words that are not meaningful alt text.
+     * Case-insensitive exact match.
+     */
+    const LOW_QUALITY_WORDS = array(
+        'image', 'photo', 'img', 'picture', 'screenshot',
+        'graphic', 'thumbnail', 'banner', 'logo', 'icon',
+    );
 
     public static function init() {
         $instance = new self();
@@ -44,7 +53,7 @@ class UWGS_Alt_Text_Tool {
         add_action( 'manage_media_custom_column',     array( $this, 'render_column' ), 10, 2 );
         add_filter( 'manage_upload_sortable_columns', array( $this, 'register_sortable' ) );
 
-        // Query: sort + blank filter
+        // Query: sort + attention filter
         add_action( 'pre_get_posts', array( $this, 'handle_query' ) );
 
         // Toolbar filter button
@@ -70,6 +79,47 @@ class UWGS_Alt_Text_Tool {
 
         // Gutenberg: block canvas warning + pre-publish panel
         add_action( 'enqueue_block_editor_assets', array( $this, 'enqueue_block_editor_assets' ) );
+    }
+
+    // =========================================================================
+    // ALT TEXT QUALITY HELPER
+    //
+    // Single source of truth for "needs attention" definition.
+    // Returns true if alt text is missing, empty, whitespace-only,
+    // too short, a generic placeholder word, filename-like, or numeric-only.
+    // Used by stats, filter query, and column display.
+    // =========================================================================
+
+    private function uwgs_alt_needs_attention( $alt ) {
+
+        // 1. Missing or whitespace-only
+        $trimmed = trim( (string) $alt );
+        if ( $trimmed === '' ) {
+            return true;
+        }
+
+        // 2. Too short (under 3 characters)
+        if ( mb_strlen( $trimmed ) < 3 ) {
+            return true;
+        }
+
+        // 3. Numeric only
+        if ( ctype_digit( str_replace( ' ', '', $trimmed ) ) ) {
+            return true;
+        }
+
+        // 4. Generic placeholder word (case-insensitive exact match)
+        if ( in_array( strtolower( $trimmed ), self::LOW_QUALITY_WORDS, true ) ) {
+            return true;
+        }
+
+        // 5. Filename-like: word_digits or word-digits pattern
+        //    e.g. IMG_1234, DSC00981, photo_001, img-456
+        if ( preg_match( '/^[a-z]{1,6}[_\-]\d+$/i', $trimmed ) ) {
+            return true;
+        }
+
+        return false;
     }
 
     // =========================================================================
@@ -99,13 +149,24 @@ class UWGS_Alt_Text_Tool {
         $needs    = get_post_meta( $post_id, self::NEEDS_ALT_KEY, true );
         $can_edit = current_user_can( 'edit_post', $post_id );
 
+        // Determine display state
+        $is_empty       = ( $alt === '' || $alt === false );
+        $is_low_quality = ( ! $is_empty && $this->uwgs_alt_needs_attention( $alt ) );
+
         ?>
         <div class="uwgs-alt-wrap" data-post-id="<?php echo esc_attr( $post_id ); ?>">
 
             <div class="uwgs-alt-display">
 
-                <?php if ( ! empty( $alt ) ) : ?>
+                <?php if ( ! empty( $alt ) && ! $is_low_quality ) : ?>
                     <span class="uwgs-alt-value uwgs-has-alt"><?php echo esc_html( $alt ); ?></span>
+
+                <?php elseif ( $is_low_quality ) : ?>
+                    <span class="uwgs-alt-value uwgs-low-quality"
+                          title="<?php esc_attr_e( 'Alt text may not be meaningful', 'uwgs-alt-text-tool' ); ?>">
+                        ⚠ <?php echo esc_html( $alt ); ?>
+                    </span>
+
                 <?php else : ?>
                     <span class="uwgs-alt-value uwgs-alt-blank"
                           aria-label="<?php esc_attr_e( 'Alt text is blank', 'uwgs-alt-text-tool' ); ?>">
@@ -186,7 +247,15 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
-    // QUERY: SORT + BLANK FILTER
+    // QUERY: SORT + ATTENTION FILTER
+    //
+    // Two-pass approach:
+    // Pass 1: WP_Query catches cheap SQL cases (NOT EXISTS + empty string)
+    //         plus images with alt text present (for low-quality PHP check)
+    // Pass 2: PHP post-processes to exclude low-quality alt text from results
+    //
+    // For the filter we use a session transient to store IDs that passed
+    // PHP post-processing, then filter by those IDs in the main query.
     // =========================================================================
 
     public function handle_query( $query ) {
@@ -204,14 +273,58 @@ class UWGS_Alt_Text_Tool {
             $query->set( 'orderby', 'meta_value' );
         }
 
-        if ( isset( $_GET['alt_filter'] ) && 'blank' === sanitize_key( $_GET['alt_filter'] ) ) {
-            $query->set( 'post_mime_type', 'image' );
-            $query->set( 'meta_query', array(
-                'relation' => 'OR',
-                array( 'key' => self::META_KEY, 'compare' => 'NOT EXISTS' ),
-                array( 'key' => self::META_KEY, 'value' => '', 'compare' => '=' ),
-            ) );
+        if ( isset( $_GET['alt_filter'] ) && 'attention' === sanitize_key( $_GET['alt_filter'] ) ) {
+
+            // Get IDs needing attention via $wpdb (same logic as stats)
+            $ids = $this->get_attention_ids();
+
+            if ( empty( $ids ) ) {
+                // No results — force query to return nothing
+                $query->set( 'post__in', array( 0 ) );
+            } else {
+                $query->set( 'post_mime_type', 'image' );
+                $query->set( 'post__in', $ids );
+                $query->set( 'orderby', 'post__in' );
+            }
         }
+    }
+
+    /**
+     * Get all image attachment IDs whose alt text needs attention.
+     * Uses a single $wpdb query + PHP post-processing.
+     * Result cached in transient for 12 hours (same cache as stats).
+     *
+     * @return int[]
+     */
+    private function get_attention_ids() {
+        $cached = get_transient( 'uwgs_attention_ids' );
+        if ( false !== $cached ) {
+            return $cached;
+        }
+
+        global $wpdb;
+
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT p.ID, pm.meta_value AS alt_text
+             FROM {$wpdb->posts} p
+             LEFT JOIN {$wpdb->postmeta} pm
+                 ON p.ID = pm.post_id
+                 AND pm.meta_key = %s
+             WHERE p.post_type = 'attachment'
+               AND p.post_status = 'inherit'
+               AND p.post_mime_type LIKE 'image/%'",
+            self::META_KEY
+        ) );
+
+        $ids = array();
+        foreach ( $rows as $row ) {
+            if ( $this->uwgs_alt_needs_attention( $row->alt_text ) ) {
+                $ids[] = (int) $row->ID;
+            }
+        }
+
+        set_transient( 'uwgs_attention_ids', $ids, 12 * HOUR_IN_SECONDS );
+        return $ids;
     }
 
     // =========================================================================
@@ -234,18 +347,18 @@ class UWGS_Alt_Text_Tool {
             }
         }
 
-        $is_active = ( 'blank' === $current );
-        $blank_url = add_query_arg( array_merge( $extra, array( 'alt_filter' => 'blank' ) ), $base_url );
-        $clear_url = add_query_arg( array_merge( $extra, array( 'alt_filter' => '' ) ), $base_url );
+        $is_active    = ( 'attention' === $current );
+        $attention_url = add_query_arg( array_merge( $extra, array( 'alt_filter' => 'attention' ) ), $base_url );
+        $clear_url     = add_query_arg( array_merge( $extra, array( 'alt_filter' => '' ) ), $base_url );
 
         printf(
             '<a href="%s" class="button%s" style="margin-left:4px;" aria-pressed="%s">%s</a>',
-            esc_url( $is_active ? $clear_url : $blank_url ),
+            esc_url( $is_active ? $clear_url : $attention_url ),
             $is_active ? ' button-primary' : '',
             $is_active ? 'true' : 'false',
             $is_active
-                ? esc_html__( '✕ Clear Alt Filter', 'uwgs-alt-text-tool' )
-                : esc_html__( '⚠ Blank Alt Text', 'uwgs-alt-text-tool' )
+                ? esc_html__( '✕ Clear Filter', 'uwgs-alt-text-tool' )
+                : esc_html__( '⚠ Alt text issues', 'uwgs-alt-text-tool' )
         );
     }
 
@@ -309,8 +422,9 @@ class UWGS_Alt_Text_Tool {
         delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
 
         wp_send_json_success( array(
-            'alt_text' => $alt_text,
-            'message'  => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
+            'alt_text'        => $alt_text,
+            'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
+            'message'         => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
         ) );
     }
 
@@ -341,9 +455,10 @@ class UWGS_Alt_Text_Tool {
         $alt = get_post_meta( $attachment_id, self::META_KEY, true );
 
         wp_send_json_success( array(
-            'alt'           => $alt,
-            'has_alt'       => ! empty( $alt ),
-            'attachment_id' => $attachment_id,
+            'alt'             => $alt,
+            'has_alt'         => ! empty( $alt ),
+            'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
+            'attachment_id'   => $attachment_id,
         ) );
     }
 
@@ -360,44 +475,75 @@ class UWGS_Alt_Text_Tool {
         );
     }
 
+    /**
+     * Get alt text coverage stats using a single $wpdb query + PHP post-processing.
+     *
+     * Returns:
+     *   total          — all images in media library
+     *   good           — images with meaningful alt text
+     *   missing        — alt text absent or empty/whitespace
+     *   low_quality    — alt text present but junk (generic word, filename-like etc.)
+     *   needs_attention — missing + low_quality combined
+     *   new_missing    — images flagged as uploaded without alt text
+     */
     private function get_alt_text_stats() {
         $cached = get_transient( 'uwgs_alt_text_stats' );
         if ( false !== $cached ) { return $cached; }
 
-        $total_query = new WP_Query( array(
-            'post_type' => 'attachment', 'post_mime_type' => 'image',
-            'post_status' => 'inherit', 'posts_per_page' => -1,
-            'fields' => 'ids', 'no_found_rows' => false,
-        ) );
-        $total = (int) $total_query->found_posts;
+        global $wpdb;
 
-        $missing_query = new WP_Query( array(
-            'post_type' => 'attachment', 'post_mime_type' => 'image',
-            'post_status' => 'inherit', 'posts_per_page' => -1,
-            'fields' => 'ids', 'no_found_rows' => false,
-            'meta_query' => array(
-                'relation' => 'OR',
-                array( 'key' => self::META_KEY, 'compare' => 'NOT EXISTS' ),
-                array( 'key' => self::META_KEY, 'value' => '', 'compare' => '=' ),
-            ),
+        // Single query: all image attachments + their alt text
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT p.ID, pm.meta_value AS alt_text
+             FROM {$wpdb->posts} p
+             LEFT JOIN {$wpdb->postmeta} pm
+                 ON p.ID = pm.post_id
+                 AND pm.meta_key = %s
+             WHERE p.post_type = 'attachment'
+               AND p.post_status = 'inherit'
+               AND p.post_mime_type LIKE 'image/%'",
+            self::META_KEY
         ) );
-        $missing = (int) $missing_query->found_posts;
 
-        $new_query = new WP_Query( array(
-            'post_type' => 'attachment', 'post_mime_type' => 'image',
-            'post_status' => 'inherit', 'posts_per_page' => -1,
-            'fields' => 'ids', 'no_found_rows' => false,
-            'meta_query' => array(
-                array( 'key' => self::NEEDS_ALT_KEY, 'value' => '1', 'compare' => '=' ),
-            ),
+        $total       = count( $rows );
+        $missing     = 0;
+        $low_quality = 0;
+        $good        = 0;
+
+        foreach ( $rows as $row ) {
+            $trimmed = trim( (string) $row->alt_text );
+
+            if ( $trimmed === '' ) {
+                // Truly missing or empty
+                $missing++;
+            } elseif ( $this->uwgs_alt_needs_attention( $row->alt_text ) ) {
+                // Present but low quality
+                $low_quality++;
+            } else {
+                $good++;
+            }
+        }
+
+        // New uploads missing alt text (flagged by plugin on upload)
+        $new_missing = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(DISTINCT p.ID)
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+             WHERE p.post_type = 'attachment'
+               AND p.post_status = 'inherit'
+               AND p.post_mime_type LIKE 'image/%'
+               AND pm.meta_key = %s
+               AND pm.meta_value = '1'",
+            self::NEEDS_ALT_KEY
         ) );
-        $new_missing = (int) $new_query->found_posts;
 
         $stats = array(
-            'total'       => $total,
-            'with_alt'    => max( 0, $total - $missing ),
-            'missing'     => $missing,
-            'new_missing' => $new_missing,
+            'total'           => $total,
+            'good'            => $good,
+            'missing'         => $missing,
+            'low_quality'     => $low_quality,
+            'needs_attention' => $missing + $low_quality,
+            'new_missing'     => $new_missing,
         );
 
         set_transient( 'uwgs_alt_text_stats', $stats, 12 * HOUR_IN_SECONDS );
@@ -406,17 +552,22 @@ class UWGS_Alt_Text_Tool {
 
     public static function clear_stats_cache() {
         delete_transient( 'uwgs_alt_text_stats' );
+        delete_transient( 'uwgs_attention_ids' );
     }
 
     public function render_dashboard_widget() {
 
-        $stats       = $this->get_alt_text_stats();
-        $total       = $stats['total'];
-        $with_alt    = $stats['with_alt'];
-        $missing     = $stats['missing'];
-        $new_missing = $stats['new_missing'];
-        $pct         = $total > 0 ? round( ( $with_alt / $total ) * 100 ) : 100;
-        $library_url = admin_url( 'upload.php?alt_filter=blank' );
+        $stats          = $this->get_alt_text_stats();
+        $total          = $stats['total'];
+        $good           = $stats['good'];
+        $missing        = $stats['missing'];
+        $low_quality    = $stats['low_quality'];
+        $needs_attention = $stats['needs_attention'];
+        $new_missing    = $stats['new_missing'];
+
+        // Coverage percentage based on good alt text only
+        $pct         = $total > 0 ? round( ( $good / $total ) * 100 ) : 100;
+        $library_url = admin_url( 'upload.php?alt_filter=attention' );
 
         ?>
         <div class="uwgs-widget" style="font-size:13px;line-height:1.6;">
@@ -434,7 +585,7 @@ class UWGS_Alt_Text_Tool {
                             <?php esc_html_e( 'coverage', 'uwgs-alt-text-tool' ); ?>
                         </span>
                         <span style="color:#555;font-size:12px;">
-                            <?php echo esc_html( number_format_i18n( $with_alt ) ); ?>
+                            <?php echo esc_html( number_format_i18n( $good ) ); ?>
                             <?php esc_html_e( 'of', 'uwgs-alt-text-tool' ); ?>
                             <?php echo esc_html( number_format_i18n( $total ) ); ?>
                             <?php esc_html_e( 'images', 'uwgs-alt-text-tool' ); ?>
@@ -455,35 +606,73 @@ class UWGS_Alt_Text_Tool {
                 <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
                     <tbody>
                         <tr>
-                            <td style="padding:3px 0;color:#555;"><?php esc_html_e( 'Total images', 'uwgs-alt-text-tool' ); ?></td>
-                            <td style="padding:3px 0;text-align:right;font-weight:600;"><?php echo esc_html( number_format_i18n( $total ) ); ?></td>
+                            <td style="padding:3px 0;color:#555;">
+                                <?php esc_html_e( 'Total images', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;">
+                                <?php echo esc_html( number_format_i18n( $total ) ); ?>
+                            </td>
                         </tr>
                         <tr>
-                            <td style="padding:3px 0;color:#2e7d32;"><?php esc_html_e( 'Have alt text', 'uwgs-alt-text-tool' ); ?></td>
-                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#2e7d32;"><?php echo esc_html( number_format_i18n( $with_alt ) ); ?></td>
+                            <td style="padding:3px 0;color:#2e7d32;">
+                                <?php esc_html_e( 'Good alt text', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#2e7d32;">
+                                <?php echo esc_html( number_format_i18n( $good ) ); ?>
+                            </td>
                         </tr>
                         <tr>
-                            <td style="padding:3px 0;color:#c62828;"><?php esc_html_e( 'Missing alt text', 'uwgs-alt-text-tool' ); ?></td>
-                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#c62828;"><?php echo esc_html( number_format_i18n( $missing ) ); ?></td>
+                            <td style="padding:3px 0;color:#c62828;">
+                                <?php esc_html_e( 'Missing alt text', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#c62828;">
+                                <?php echo esc_html( number_format_i18n( $missing ) ); ?>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:3px 0;color:#856404;">
+                                <?php esc_html_e( 'Low quality alt text', 'uwgs-alt-text-tool' ); ?>
+                                <span style="font-size:11px;color:#999;display:block;">
+                                    <?php esc_html_e( 'Generic, filename-like, or too short', 'uwgs-alt-text-tool' ); ?>
+                                </span>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#856404;vertical-align:top;">
+                                <?php echo esc_html( number_format_i18n( $low_quality ) ); ?>
+                            </td>
                         </tr>
                         <?php if ( $new_missing > 0 ) : ?>
                         <tr>
-                            <td style="padding:3px 0;color:#856404;"><?php esc_html_e( 'New uploads missing alt text', 'uwgs-alt-text-tool' ); ?></td>
-                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#856404;"><?php echo esc_html( number_format_i18n( $new_missing ) ); ?></td>
+                            <td style="padding:3px 0;color:#555;font-style:italic;">
+                                <?php esc_html_e( 'New uploads missing alt text', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:3px 0;text-align:right;font-weight:600;color:#555;">
+                                <?php echo esc_html( number_format_i18n( $new_missing ) ); ?>
+                            </td>
                         </tr>
                         <?php endif; ?>
+                        <tr style="border-top:1px solid #e0e0e0;">
+                            <td style="padding:6px 0 3px;font-weight:600;color:#1d2327;">
+                                <?php esc_html_e( 'Total needing attention', 'uwgs-alt-text-tool' ); ?>
+                            </td>
+                            <td style="padding:6px 0 3px;text-align:right;font-weight:600;color:#c62828;">
+                                <?php echo esc_html( number_format_i18n( $needs_attention ) ); ?>
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
 
-                <?php if ( $missing > 0 ) : ?>
+                <?php if ( $needs_attention > 0 ) : ?>
                     <p style="margin:0 0 6px;">
                         <a href="<?php echo esc_url( $library_url ); ?>" class="button button-primary button-small">
-                            <?php printf( esc_html__( 'Fix %s images →', 'uwgs-alt-text-tool' ), esc_html( number_format_i18n( $missing ) ) ); ?>
+                            <?php printf(
+                                esc_html__( 'Fix %s images →', 'uwgs-alt-text-tool' ),
+                                esc_html( number_format_i18n( $needs_attention ) )
+                            ); ?>
                         </a>
                     </p>
                 <?php else : ?>
                     <p style="margin:0;color:#2e7d32;font-weight:600;">
-                        ✓ <?php esc_html_e( 'All images have alt text. Great work!', 'uwgs-alt-text-tool' ); ?>
+                        ✓ <?php esc_html_e( 'All images have good alt text. Great work!', 'uwgs-alt-text-tool' ); ?>
                     </p>
                 <?php endif; ?>
 
@@ -535,9 +724,6 @@ class UWGS_Alt_Text_Tool {
                 $this->enqueue_attachment_edit_assets( $post->ID );
             }
 
-            // All non-block-editor post types get the same presave treatment —
-            // including uw_stories. The inline notice bar gracefully falls back
-            // to document.body if #titlediv is absent.
             if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
                 $this->enqueue_classic_presave_assets();
             }
@@ -555,7 +741,7 @@ class UWGS_Alt_Text_Tool {
 
     private function enqueue_list_view_assets() {
 
-        $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-alt-new-flag                  {
+        $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-low-quality                   { color:#856404; font-weight:600; }.uwgs-alt-new-flag                  {
                 display:inline-block; margin-left:4px; font-size:11px;
                 background:#fff3cd; color:#856404; border:1px solid #ffc107;
                 border-radius:3px; padding:1px 5px; vertical-align:middle;
@@ -569,7 +755,6 @@ class UWGS_Alt_Text_Tool {
         wp_enqueue_style( 'uwgs-alt-text-tool' );
         wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        // Build per-attachment suggestion data: caption first, then filename
         $suggestions = array();
         global $wp_query;
         if ( $wp_query && ! empty( $wp_query->posts ) ) {
@@ -578,9 +763,10 @@ class UWGS_Alt_Text_Tool {
                 $mime    = get_post_mime_type( $post_id );
                 if ( strpos( $mime, 'image/' ) !== 0 ) { continue; }
                 $alt = get_post_meta( $post_id, self::META_KEY, true );
-                if ( ! empty( $alt ) ) { continue; }
+                // Suggest for blank OR low-quality alt text
+                if ( ! empty( $alt ) && ! $this->uwgs_alt_needs_attention( $alt ) ) { continue; }
                 $caption  = get_post_field( 'post_excerpt', $post_id );
-                $filename = get_the_title( $post_id );
+                $filename = get_post_field( 'post_title', $post_id );
                 if ( ! empty( trim( $caption ) ) ) {
                     $suggestions[ $post_id ] = array(
                         'type'  => 'caption',
@@ -620,29 +806,26 @@ jQuery( function( $ ) {
 
     function sanitizeFilename( raw ) {
         var s = raw;
+        // 0. Decode all HTML entities to a space
+        s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
         // 1. Strip extension
         s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
-        // 2. Replace HTML entities for multiplication sign (&#215; or &times;)
-        //    before other processing so NNNxNNN patterns are caught
-        s = s.replace( /&#215;|&times;/gi, 'x' );
-        // 3. Replace hyphens and underscores with spaces
+        // 2. Replace hyphens and underscores with spaces
         s = s.replace( /[-_]+/g, ' ' );
-        // 4. Remove WP thumbnail size patterns: NNNxNNN (plain x or entity-replaced)
+        // 3. Remove WP thumbnail size patterns: NNNxNNN
         s = s.replace( /\b\d+x\d+\b/gi, '' );
-        // 5. Remove 8-digit date patterns (YYYYMMDD: 19xxxxxx or 20xxxxxx)
+        // 4. Remove 8-digit date patterns (YYYYMMDD)
         s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-        // 6. Remove standalone 4-digit years (1900-2099) only when NOT
-        //    immediately followed by letters (avoids stripping 2026 from 2026uw3mt)
+        // 5. Remove standalone 4-digit years not followed by alphanumeric
         s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
-        // 7. Remove 'scaled' (WP large image suffix)
+        // 6. Remove 'scaled'
         s = s.replace( /\bscaled\b/gi, '' );
-        // 8. Remove isolated 1-2 digit numbers (size variants)
-        //    but preserve longer reference numbers
+        // 7. Remove isolated 1-2 digit numbers
         s = s.replace( /\b\d{1,2}\b/g, '' );
-        // 9. Collapse multiple spaces and trim
+        // 8. Collapse spaces and trim
         s = s.replace( /\s{2,}/g, ' ' ).trim();
-        // 10. Title case
-        s = s.replace( /\b\w/g, function( c ) { return c.toUpperCase(); } );
+        // 9. Title case — words starting with a letter only
+        s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
         return s;
     }
 
@@ -656,7 +839,10 @@ jQuery( function( $ ) {
         $editor.show();
         $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
 
-        if ( $input.val().trim() === '' && suggestions[ postId ] ) {
+        // Suggest if input is empty OR contains low-quality value
+        var currentVal = $input.val().trim();
+        var hasSuggestion = suggestions[ postId ];
+        if ( hasSuggestion ) {
             var suggestion = suggestions[ postId ];
             var value      = suggestion.type === 'filename'
                 ? sanitizeFilename( suggestion.value )
@@ -717,13 +903,20 @@ jQuery( function( $ ) {
                 if ( response.success ) {
                     var $display = $wrap.find( '.uwgs-alt-display' );
                     var $value   = $display.find( '.uwgs-alt-value' );
-                    if ( altText.length ) {
-                        $value.text( altText ).removeClass( 'uwgs-alt-blank' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
+
+                    if ( altText.length && ! response.data.needs_attention ) {
+                        // Good alt text
+                        $value.text( altText ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' ).text( altText );
                         $wrap.find( '.uwgs-alt-new-flag' ).remove();
                         delete suggestions[ postId ];
+                    } else if ( altText.length && response.data.needs_attention ) {
+                        // Saved but still low quality
+                        $value.text( '⚠ ' + altText ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
                     } else {
-                        $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
+                        // Blank
+                        $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
                     }
+
                     $wrap.find( '.uwgs-alt-editor' ).hide();
                     $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
                     $display.show();
@@ -872,7 +1065,7 @@ jQuery( function( $ ) {
     if ( shouldCopy && capVal ) {
         $altField.val( capVal );
         var $notice = $( '<div>' ).addClass( 'uwgs-caption-copy-notice' ).attr( { 'role': 'note', 'aria-live': 'polite' } );
-        var $msg     = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
+        var $msg = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
         var $dismiss = $( '<button>' ).attr( { 'type': 'button', 'aria-label': i18n.dismissNotice || 'Dismiss', 'title': i18n.dismissNotice || 'Dismiss' } ).html( '✕' ).on( 'click', function() { $notice.remove(); } );
         $notice.append( $msg ).append( $dismiss );
         $altField.after( $notice );
@@ -911,11 +1104,6 @@ JS;
 
     // =========================================================================
     // CLASSIC EDITOR + ALL NON-BLOCK-EDITOR POST TYPES: PRE-SAVE SCAN
-    //
-    // Applies to: posts, pages, custom post types including uw_stories.
-    // The inline notice bar anchors to #titlediv if present; falls back
-    // to document.body if absent (e.g. uw_stories has no #titlediv).
-    // The popup warning works regardless of post type DOM structure.
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -998,66 +1186,38 @@ JS;
     var saving          = false;
     var noticeDismissed = false;
 
-    // -----------------------------------------------------------------
-    // CONTENT SCAN
-    // Uses tinyMCE.triggerSave() to flush all editors before reading.
-    // Falls back to textarea for non-TinyMCE contexts (uw_stories etc).
-    // -----------------------------------------------------------------
-
-    function getPostContent() {
-        // Flush all TinyMCE instances to their respective textareas
-        if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
-            try { tinyMCE.triggerSave(); } catch(e) {}
-        }
-        // Return standard #content textarea value for standard editors
-        var textarea = document.getElementById( 'content' );
-        return textarea ? textarea.value : '';
-    }
-
     function contentHasMissingAlt() {
         var allContent = [];
 
         if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
-            // Read directly from every TinyMCE instance — covers both standard
-            // #content editors AND ACF iframe editors (data-id="acf-editor-*")
             tinyMCE.editors.forEach( function( editor ) {
                 if ( editor && editor.getContent ) {
-                    try {
-                        allContent.push( editor.getContent() );
-                    } catch(e) {}
+                    try { allContent.push( editor.getContent() ); } catch(e) {}
                 }
             } );
         }
 
-        // Also read #content textarea as fallback (standard classic editor)
         var textarea = document.getElementById( 'content' );
         if ( textarea && textarea.value ) {
             allContent.push( textarea.value );
         }
 
-        // If nothing found anywhere, nothing to scan
         if ( ! allContent.length ) { return false; }
 
-        // Scan all collected content for images missing alt text
         for ( var c = 0; c < allContent.length; c++ ) {
             if ( ! allContent[c] ) { continue; }
+            if ( allContent[c].indexOf( '<img' ) === -1 ) { continue; }
             var tmp = document.createElement( 'div' );
             tmp.innerHTML = allContent[c];
             var imgs = tmp.querySelectorAll( 'img' );
             for ( var i = 0; i < imgs.length; i++ ) {
-                var alt = ( imgs[i].getAttribute( 'alt' ) || '' ).trim();
-                // Skip TinyMCE UI elements (resize handles etc)
                 if ( imgs[i].getAttribute( 'data-mce-bogus' ) ) { continue; }
-                if ( alt === '' ) { return true; }
+                if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) { return true; }
             }
         }
 
         return false;
     }
-
-    // -----------------------------------------------------------------
-    // FEATURED IMAGE CHECK
-    // -----------------------------------------------------------------
 
     function getFeaturedImageId() {
         var el = document.getElementById( '_thumbnail_id' );
@@ -1088,17 +1248,12 @@ JS;
             formData.append( 'action',        'uwgs_get_attachment_alt' );
             formData.append( 'nonce',         nonce );
             formData.append( 'attachment_id', thumbnailId );
-            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) { resolve( response.success && ! response.data.has_alt ); } ).catch( function() { resolve( false ); } );
+            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
+                    // needs_attention covers both missing and low-quality
+                    resolve( response.success && response.data.needs_attention );
+                } ).catch( function() { resolve( false ); } );
         } );
     }
-
-    // -----------------------------------------------------------------
-    // INLINE NOTICE BAR
-    // Anchors to #titlediv if present (standard posts/pages).
-    // Falls back to document.body for post types without #titlediv
-    // (e.g. uw_stories) — appended to body, harmless if not visible.
-    // Stays dismissed until new media inserted or all issues resolved.
-    // -----------------------------------------------------------------
 
     function buildNoticeBar() {
         noticeEl = document.createElement( 'div' );
@@ -1121,7 +1276,6 @@ JS;
         } );
         noticeEl.appendChild( dismissBtn );
 
-        // Anchor: prefer #titlediv (standard WP), fall back to body
         var anchor = document.getElementById( 'titlediv' )
                   || document.getElementById( 'post-body-content' );
         if ( anchor && anchor.parentNode ) {
@@ -1165,10 +1319,6 @@ JS;
             updateNoticeBar( hasContent, hasFeatured );
         } );
     }
-
-    // -----------------------------------------------------------------
-    // PRE-SAVE WARNING MODAL
-    // -----------------------------------------------------------------
 
     function buildWarningPanel() {
         warningEl = document.createElement( 'div' );
@@ -1236,12 +1386,6 @@ JS;
         saving = false;
     }
 
-    // -----------------------------------------------------------------
-    // SAVE BUTTON INTERCEPT — capture phase
-    // Runs both content scan (sync) and featured image check (async)
-    // in parallel. Neither can suppress the other.
-    // -----------------------------------------------------------------
-
     function interceptSaveButtons() {
         var saveIds = [ 'save', 'save-post', 'publish' ];
         saveIds.forEach( function( id ) {
@@ -1267,13 +1411,9 @@ JS;
                     }
                 } );
 
-            }, true ); // capture phase — fires before all other handlers
+            }, true );
         } );
     }
-
-    // -----------------------------------------------------------------
-    // WATCH FOR MEDIA MODAL CLOSE — re-scan after insert
-    // -----------------------------------------------------------------
 
     function watchForModalClose() {
         var modalObserver = new MutationObserver( function( mutations ) {
@@ -1291,10 +1431,6 @@ JS;
         } );
         modalObserver.observe( document.body, { childList: true } );
     }
-
-    // -----------------------------------------------------------------
-    // WAIT FOR TINYMCE THEN INITIAL SCAN
-    // -----------------------------------------------------------------
 
     function waitForTinyMCEThenScan() {
         var attempts    = 0;
@@ -1314,9 +1450,7 @@ JS;
                 return;
             }
 
-            // Immediate textarea scan on first attempt
             if ( attempts === 1 ) { refreshNoticeBar( false ); }
-
             if ( attempts < maxAttempts ) { setTimeout( attempt, 100 ); }
         }
 
@@ -1497,10 +1631,6 @@ JS;
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL
-    //
-    // Fix in v2.1.3: added wp.data.subscribe to force the pre-publish
-    // panel to re-evaluate and open when issues are detected at publish
-    // time, regardless of whether the panel was previously mounted.
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1536,13 +1666,8 @@ JS;
 
     var useSelect = wp.data    ? wp.data.useSelect                     : null;
     var subscribe = wp.data    ? wp.data.subscribe                     : null;
-    var dispatch  = wp.data    ? wp.data.dispatch                      : null;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
-
-    // -----------------------------------------------------------------
-    // BLOCK CANVAS WARNING HOC
-    // -----------------------------------------------------------------
 
     if ( addFilter && createHOC ) {
         var withAltWarning = createHOC( function( BlockEdit ) {
@@ -1582,10 +1707,6 @@ JS;
 
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect ) { return; }
 
-    // -----------------------------------------------------------------
-    // HELPER: check blocks recursively for missing alt text
-    // -----------------------------------------------------------------
-
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
@@ -1602,29 +1723,17 @@ JS;
         return false;
     }
 
-    // -----------------------------------------------------------------
-    // SUBSCRIBE: when the pre-publish panel opens, force it to show
-    // the correct open state by dispatching an editPost action.
-    //
-    // wp.data.subscribe fires on every store change. We watch for the
-    // pre-publish panel becoming active (isPublishSidebarOpened) and
-    // if we have issues, ensure our panel is open.
-    // -----------------------------------------------------------------
-
-    if ( subscribe && dispatch ) {
+    if ( subscribe ) {
         subscribe( function() {
             var editorStore = wp.data.select( 'core/edit-post' )
                            || wp.data.select( 'core/editor' );
             if ( ! editorStore ) { return; }
 
-            // Only act when pre-publish sidebar is open
             var sidebarOpen = editorStore.isPublishSidebarOpened
                 ? editorStore.isPublishSidebarOpened()
                 : false;
-
             if ( ! sidebarOpen ) { return; }
 
-            // Check for issues
             var blockEditorStore = wp.data.select( 'core/block-editor' );
             if ( ! blockEditorStore ) { return; }
 
@@ -1641,10 +1750,8 @@ JS;
             }
 
             if ( contentMissing || featuredMissing ) {
-                // Open our specific panel via editPost dispatch
                 var editPostDispatch = wp.data.dispatch( 'core/edit-post' );
                 if ( editPostDispatch && editPostDispatch.toggleEditorPanelOpened ) {
-                    // Only open if not already open
                     var panelId = 'uwgs-alt-text-panel/uwgs-alt-text-panel';
                     var isOpen  = editorStore.isEditorPanelOpened
                         ? editorStore.isEditorPanelOpened( panelId )
@@ -1656,10 +1763,6 @@ JS;
             }
         } );
     }
-
-    // -----------------------------------------------------------------
-    // PRE-PUBLISH PANEL COMPONENT
-    // -----------------------------------------------------------------
 
     function UWGSAltTextPanel() {
 
