@@ -9,7 +9,7 @@
  *                    caption to alt text server-side on attachment save and in the Add Media modal.
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Built for UW Graduate School.
- * Version:           2.3.0
+ * Version:           2.3.1
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -739,70 +739,74 @@ class UWGS_Alt_Text_Tool {
     // LIST VIEW ASSETS
     // =========================================================================
 
-    private function enqueue_list_view_assets() {
+ private function enqueue_list_view_assets() {
 
-        $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-low-quality                   { color:#856404; font-weight:600; }.uwgs-alt-new-flag                  {
-                display:inline-block; margin-left:4px; font-size:11px;
-                background:#fff3cd; color:#856404; border:1px solid #ffc107;
-                border-radius:3px; padding:1px 5px; vertical-align:middle;
-            }.uwgs-alt-edit-btn                  {
-                cursor:pointer; text-decoration:underline; color:#2271b1;
-                margin-left:6px; font-size:12px; background:none; border:none; padding:0;
-            }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
-        ';
+    $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-low-quality                   { color:#856404; font-weight:600; }.uwgs-alt-new-flag                  {
+            display:inline-block; margin-left:4px; font-size:11px;
+            background:#fff3cd; color:#856404; border:1px solid #ffc107;
+            border-radius:3px; padding:1px 5px; vertical-align:middle;
+        }.uwgs-alt-edit-btn                  {
+            cursor:pointer; text-decoration:underline; color:#2271b1;
+            margin-left:6px; font-size:12px; background:none; border:none; padding:0;
+        }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
+    ';
 
-        wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
-        wp_enqueue_style( 'uwgs-alt-text-tool' );
-        wp_add_inline_style( 'uwgs-alt-text-tool', $css );
+    wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
+    wp_enqueue_style( 'uwgs-alt-text-tool' );
+    wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        $suggestions = array();
-        global $wp_query;
-        if ( $wp_query && ! empty( $wp_query->posts ) ) {
-            foreach ( $wp_query->posts as $attachment ) {
-                $post_id = is_object( $attachment ) ? $attachment->ID : (int) $attachment;
-                $mime    = get_post_mime_type( $post_id );
-                if ( strpos( $mime, 'image/' ) !== 0 ) { continue; }
-                $alt = get_post_meta( $post_id, self::META_KEY, true );
-                // Suggest for blank OR low-quality alt text
-                if ( ! empty( $alt ) && ! $this->uwgs_alt_needs_attention( $alt ) ) { continue; }
-                $caption  = get_post_field( 'post_excerpt', $post_id );
-                $filename = get_post_field( 'post_title', $post_id );
-                if ( ! empty( trim( $caption ) ) ) {
-                    $suggestions[ $post_id ] = array(
-                        'type'  => 'caption',
-                        'value' => sanitize_text_field( $caption ),
-                    );
-                } else {
-                    $suggestions[ $post_id ] = array(
-                        'type'  => 'filename',
-                        'value' => sanitize_text_field( $filename ),
-                    );
-                }
+    $suggestions = array();
+    global $wp_query;
+    if ( $wp_query && ! empty( $wp_query->posts ) ) {
+        foreach ( $wp_query->posts as $attachment ) {
+            $post_id = is_object( $attachment ) ? $attachment->ID : (int) $attachment;
+            $mime    = get_post_mime_type( $post_id );
+            if ( strpos( $mime, 'image/' ) !== 0 ) { continue; }
+            $alt = get_post_meta( $post_id, self::META_KEY, true );
+            if ( ! empty( $alt ) && ! $this->uwgs_alt_needs_attention( $alt ) ) { continue; }
+            $caption  = get_post_field( 'post_excerpt', $post_id );
+            $filename = get_post_field( 'post_title', $post_id );
+            if ( ! empty( trim( $caption ) ) ) {
+                $suggestions[ $post_id ] = array(
+                    'type'  => 'caption',
+                    'value' => sanitize_text_field( $caption ),
+                );
+            } else {
+                $suggestions[ $post_id ] = array(
+                    'type'  => 'filename',
+                    'value' => sanitize_text_field( $filename ),
+                );
             }
         }
+    }
 
-        $data = array(
-            'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
-            'suggestions' => $suggestions,
-            'i18n'        => array(
-                'saveFailed'    => __( 'Save failed. Please try again.', 'uwgs-alt-text-tool' ),
-                'requestFailed' => __( 'Request failed. Please try again.', 'uwgs-alt-text-tool' ),
-                'saved'         => __( 'Saved.', 'uwgs-alt-text-tool' ),
-                'blank'         => __( '(blank)', 'uwgs-alt-text-tool' ),
-                'fromCaption'   => __( 'Suggested from caption — please review', 'uwgs-alt-text-tool' ),
-                'fromFilename'  => __( 'Suggested from filename — please review', 'uwgs-alt-text-tool' ),
-            ),
-        );
+    $data = array(
+        'ajaxUrl'     => admin_url( 'admin-ajax.php' ),
+        'suggestions' => $suggestions,
+        'i18n'        => array(
+            'saveFailed'         => __( 'Save failed. Please try again.', 'uwgs-alt-text-tool' ),
+            'requestFailed'      => __( 'Request failed. Please try again.', 'uwgs-alt-text-tool' ),
+            'saved'              => __( 'Saved.', 'uwgs-alt-text-tool' ),
+            'blank'              => __( '(blank)', 'uwgs-alt-text-tool' ),
+            'fromCaption'        => __( 'Suggested from caption — please review', 'uwgs-alt-text-tool' ),
+            'fromFilename'       => __( 'Suggested from filename — please review', 'uwgs-alt-text-tool' ),
+            'lowQualitySuggest'  => __( 'Low-quality suggestion — please write a description', 'uwgs-alt-text-tool' ),
+        ),
+    );
 
-        wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
+    wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
 
-        $js = <<<'JS'
+    $js = <<<'JS'
 jQuery( function( $ ) {
 
     var data        = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
     var ajaxUrl     = data.ajaxUrl     || '';
     var suggestions = data.suggestions || {};
     var i18n        = data.i18n        || {};
+
+    // -----------------------------------------------------------------
+    // FILENAME SANITIZATION
+    // -----------------------------------------------------------------
 
     function sanitizeFilename( raw ) {
         var s = raw;
@@ -829,6 +833,75 @@ jQuery( function( $ ) {
         return s;
     }
 
+    // -----------------------------------------------------------------
+    // SUGGESTION QUALITY VALIDATION
+    //
+    // Applied only to filename-derived suggestions (not captions).
+    // Returns true if the suggestion is good enough to auto-fill.
+    //
+    // Fails if ANY of these are true:
+    //   1. Fewer than 2 meaningful words (non-numeric, length > 1)
+    //   2. More than half the tokens are numeric or short codes
+    //   3. Original filename matches camera pattern (IMG_, DSC_, etc.)
+    //   4. Result is a single token with no spaces
+    //   5. Fewer than 5 characters total after sanitization
+    // -----------------------------------------------------------------
+
+    function validateFilenameSuggestion( sanitized, original ) {
+
+        // Rule 5: too short overall
+        if ( sanitized.length < 5 ) {
+            return false;
+        }
+
+        // Rule 4: single token — no spaces at all
+        if ( sanitized.indexOf( ' ' ) === -1 ) {
+            return false;
+        }
+
+        // Rule 3: camera filename pattern in the original (pre-sanitization)
+        // Catches IMG_1234, DSC00981, DSCN0001, MVI_001, MOV_001, P1234567
+        if ( /^(IMG|DSC|DSCN|MVI|MOV|P\d)[_\-\s]/i.test( original.trim() ) ) {
+            return false;
+        }
+
+        // Split into tokens for word-level checks
+        var tokens = sanitized.split( /\s+/ ).filter( function( t ) { return t.length > 0; } );
+
+        // Rule 1: fewer than 2 meaningful words
+        // A "meaningful word" is a token that:
+        //   - is longer than 1 character
+        //   - is not purely numeric
+        //   - is not a pure alphanumeric code (all digits + letters, no vowels)
+        var meaningfulWords = tokens.filter( function( t ) {
+            if ( t.length <= 1 ) { return false; }
+            if ( /^\d+$/.test( t ) ) { return false; }
+            // Pure code: all uppercase letters + digits, no lowercase vowels
+            // e.g. "A4B", "XK2", "088A" — but NOT "Meany", "Theater"
+            if ( /^[A-Z0-9]+$/.test( t ) && ! /[AEIOU]{1}/i.test( t ) ) { return false; }
+            return true;
+        } );
+
+        if ( meaningfulWords.length < 2 ) {
+            return false;
+        }
+
+        // Rule 2: more than half the tokens are numeric or short codes
+        var junkTokens = tokens.filter( function( t ) {
+            return /^\d+$/.test( t ) || ( t.length <= 3 && /^[A-Z0-9]+$/i.test( t ) );
+        } );
+
+        if ( junkTokens.length > tokens.length / 2 ) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // -----------------------------------------------------------------
+    // OPEN INLINE EDITOR
+    // -----------------------------------------------------------------
+
     $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
         var $wrap   = $( this ).closest( '.uwgs-alt-wrap' );
         var postId  = $wrap.data( 'post-id' );
@@ -839,29 +912,59 @@ jQuery( function( $ ) {
         $editor.show();
         $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
 
-        // Suggest if input is empty OR contains low-quality value
-        var currentVal = $input.val().trim();
-        var hasSuggestion = suggestions[ postId ];
-        if ( hasSuggestion ) {
+        if ( suggestions[ postId ] ) {
             var suggestion = suggestions[ postId ];
-            var value      = suggestion.type === 'filename'
-                ? sanitizeFilename( suggestion.value )
-                : suggestion.value;
 
-            if ( value ) {
-                $input.val( value );
-                var hintText = suggestion.type === 'caption'
-                    ? ( i18n.fromCaption || 'Suggested from caption — please review' )
-                    : ( i18n.fromFilename || 'Suggested from filename — please review' );
-                var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( { 'margin': '4px 0 0', 'font-size': '11px', 'color': '#856404', 'font-style': 'italic' } ).text( hintText );
-                $input.after( $hint );
-                $input.one( 'input', function() { $hint.remove(); } );
+            if ( suggestion.type === 'caption' ) {
+                // Captions: apply directly, no validation
+                $input.val( suggestion.value );
+                showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
+
+            } else {
+                // Filename: sanitize first, then validate
+                var sanitized = sanitizeFilename( suggestion.value );
+                var isGood    = validateFilenameSuggestion( sanitized, suggestion.value );
+
+                if ( isGood ) {
+                    // Good suggestion — auto-fill and show review hint
+                    $input.val( sanitized );
+                    showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
+                } else {
+                    // Poor suggestion — leave input empty, show prompt
+                    $input.val( '' );
+                    showHint( $input, i18n.lowQualitySuggest || 'Low-quality suggestion — please write a description', 'low-quality' );
+                }
             }
         }
 
         $input.trigger( 'focus' );
         $( this ).attr( 'aria-expanded', 'true' );
     } );
+
+    /**
+     * Show a hint below the input field.
+     * type: 'caption' | 'filename' | 'low-quality'
+     */
+    function showHint( $input, text, type ) {
+        $input.closest( '.uwgs-alt-editor' ).find( '.uwgs-alt-suggestion-hint' ).remove();
+
+        var styles = {
+            'caption':     { color: '#856404', fontStyle: 'italic' },
+            'filename':    { color: '#856404', fontStyle: 'italic' },
+            'low-quality': { color: '#555',    fontStyle: 'normal', fontWeight: '600' },
+        };
+
+        var style = styles[ type ] || styles['filename'];
+
+        var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( $.extend( { 'margin': '4px 0 0', 'font-size': '11px' }, style ) ).text( text );
+
+        $input.after( $hint );
+        $input.one( 'input', function() { $hint.remove(); } );
+    }
+
+    // -----------------------------------------------------------------
+    // CANCEL
+    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-cancel-btn', function() {
         var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
@@ -873,6 +976,10 @@ jQuery( function( $ ) {
         $wrap.find( '.uwgs-alt-feedback' ).text( '' ).removeClass( 'success error' );
     } );
 
+    // -----------------------------------------------------------------
+    // KEYBOARD
+    // -----------------------------------------------------------------
+
     $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
         if ( 13 === e.which ) {
             e.preventDefault();
@@ -882,6 +989,10 @@ jQuery( function( $ ) {
             $( this ).closest( '.uwgs-alt-wrap' ).find( '.uwgs-alt-cancel-btn' ).trigger( 'click' );
         }
     } );
+
+    // -----------------------------------------------------------------
+    // SAVE
+    // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
         var $btn      = $( this );
@@ -905,15 +1016,12 @@ jQuery( function( $ ) {
                     var $value   = $display.find( '.uwgs-alt-value' );
 
                     if ( altText.length && ! response.data.needs_attention ) {
-                        // Good alt text
-                        $value.text( altText ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' ).text( altText );
+                        $value.text( altText ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
                         $wrap.find( '.uwgs-alt-new-flag' ).remove();
                         delete suggestions[ postId ];
                     } else if ( altText.length && response.data.needs_attention ) {
-                        // Saved but still low quality
                         $value.text( '⚠ ' + altText ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
                     } else {
-                        // Blank
                         $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
                     }
 
@@ -938,8 +1046,8 @@ jQuery( function( $ ) {
 } );
 JS;
 
-        wp_add_inline_script( 'jquery', $js );
-    }
+    wp_add_inline_script( 'jquery', $js );
+}
 
     // =========================================================================
     // UPLOAD PAGE ASSETS
