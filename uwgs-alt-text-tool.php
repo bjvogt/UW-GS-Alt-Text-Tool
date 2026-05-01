@@ -115,13 +115,12 @@ class UWGS_Alt_Text_Tool {
         $is_image = ( strpos( $mime, 'image/' ) === 0 );
 
         if ( ! $is_image ) {
-            echo '<span style="color:#999;" aria-label="'
-                . esc_attr__( 'Not applicable', 'uwgs-alt-text-tool' ) . '">—</span>';
+            echo '<span style="color:#999;" aria-label="'. esc_attr__( 'Not applicable', 'uwgs-alt-text-tool' ). '">—</span>';
             return;
         }
 
         $alt      = get_post_meta( $post_id, self::META_KEY, true );
-        $nonce    = wp_create_nonce( self::NONCE_ACTION . '_' . $post_id );
+        $nonce    = wp_create_nonce( self::NONCE_ACTION. '_'. $post_id );
         $needs    = get_post_meta( $post_id, self::NEEDS_ALT_KEY, true );
         $can_edit = current_user_can( 'edit_post', $post_id );
 
@@ -366,7 +365,7 @@ class UWGS_Alt_Text_Tool {
         }
 
         if ( ! isset( $_POST['nonce'] )
-             || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ACTION . '_' . $post_id ) ) {
+             || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ACTION. '_'. $post_id ) ) {
             wp_send_json_error( __( 'Security check failed.', 'uwgs-alt-text-tool' ) );
         }
 
@@ -662,27 +661,16 @@ class UWGS_Alt_Text_Tool {
 
     private function enqueue_list_view_assets() {
 
-        $css = '
-            .uwgs-alt-wrap                      { line-height:1.6; }
-            .uwgs-has-alt                       { color:#2e7d32; }
-            .uwgs-alt-blank                     { color:#c62828; font-weight:600; }
-            .uwgs-low-quality                   { color:#856404; font-weight:600; }
-            .uwgs-alt-new-flag                  {
+        $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-low-quality                   { color:#856404; font-weight:600; }.uwgs-alt-new-flag                  {
                 display:inline-block; margin-left:4px; font-size:11px;
                 background:#fff3cd; color:#856404; border:1px solid #ffc107;
                 border-radius:3px; padding:1px 5px; vertical-align:middle;
-            }
-            .uwgs-alt-edit-btn                  {
+            }.uwgs-alt-edit-btn                  {
                 cursor:pointer; text-decoration:underline; color:#2271b1;
                 margin-left:6px; font-size:12px; background:none; border:none; padding:0;
-            }
-            .uwgs-alt-edit-btn:hover            { color:#135e96; }
-            .uwgs-alt-feedback.success          { color:#2e7d32; }
-            .uwgs-alt-feedback.error            { color:#c62828; }
-            .uwgs-alt-editor input[type="text"] { font-size:13px; }
+            }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
 
-            /* Task 3: Inline guidance */
-            .uwgs-alt-guidance {
+            /* Task 3: Inline guidance */.uwgs-alt-guidance {
                 margin:6px 0 4px;
                 padding:6px 8px;
                 background:#f6f7f7;
@@ -691,13 +679,11 @@ class UWGS_Alt_Text_Tool {
                 font-size:11px;
                 color:#646970;
                 line-height:1.5;
-            }
-            .uwgs-alt-guidance ul {
+            }.uwgs-alt-guidance ul {
                 margin:0;
                 padding:0 0 0 14px;
                 list-style:disc;
-            }
-            .uwgs-alt-guidance ul li {
+            }.uwgs-alt-guidance ul li {
                 margin:0;
                 padding:0;
             }
@@ -748,7 +734,7 @@ class UWGS_Alt_Text_Tool {
             ),
         );
 
-        wp_add_inline_script( 'jquery', 'var uwgsAltData = ' . wp_json_encode( $data ) . ';' );
+        wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
 
         $js = <<<'JS'
 jQuery( function( $ ) {
@@ -869,4 +855,612 @@ jQuery( function( $ ) {
                 showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
 
             } else {
-                // Filename: sanitize then validat |
+                // Filename: sanitize then validate
+                var sanitized  = sanitizeFilename( suggestion.value );
+                var quality    = validateFilenameSuggestion( sanitized, suggestion.value );
+
+                if ( quality === 'good' ) {
+                    $input.val( sanitized );
+                    showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
+
+                } else if ( quality === 'low-confidence' ) {
+                    // Auto-fill but nudge toward more detail
+                    $input.val( sanitized );
+                    showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
+
+                } else {
+                    // Junk: leave empty, prompt editor to write their own
+                    $input.val( '' );
+                    showHint( $input, i18n.lowQualitySuggest || 'Low-quality suggestion — please write a description', 'low-quality' );
+                }
+            }
+        }
+
+        $input.trigger( 'focus' );
+        $( this ).attr( 'aria-expanded', 'true' );
+    } );
+
+    // -----------------------------------------------------------------
+    // SHOW HINT
+    // type: 'caption' | 'filename' | 'low-confidence' | 'low-quality'
+    // -----------------------------------------------------------------
+
+    function showHint( $input, text, type ) {
+        $input.closest( '.uwgs-alt-editor' ).find( '.uwgs-alt-suggestion-hint' ).remove();
+
+        var styles = {
+            'caption':        { color: '#856404', fontStyle: 'italic',  fontWeight: 'normal' },
+            'filename':       { color: '#856404', fontStyle: 'italic',  fontWeight: 'normal' },
+            'low-confidence': { color: '#555',    fontStyle: 'italic',  fontWeight: 'normal' },
+            'low-quality':    { color: '#555',    fontStyle: 'normal',  fontWeight: '600'    },
+        };
+
+        var style = styles[ type ] || styles['filename'];
+
+        var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( $.extend( { 'margin': '4px 0 0', 'font-size': '11px' }, style ) ).text( text );
+
+        // Insert before the guidance block so hint appears directly under input
+        var $guidance = $input.closest( '.uwgs-alt-editor' ).find( '.uwgs-alt-guidance' );
+        if ( $guidance.length ) {
+            $guidance.before( $hint );
+        } else {
+            $input.after( $hint );
+        }
+
+        $input.one( 'input', function() { $hint.remove(); } );
+    }
+
+    // -----------------------------------------------------------------
+    // CANCEL
+    // -----------------------------------------------------------------
+
+    $( document ).on( 'click', '.uwgs-alt-cancel-btn', function() {
+        var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
+        $wrap.find( '.uwgs-alt-editor' ).hide();
+        $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
+        var $display = $wrap.find( '.uwgs-alt-display' );
+        $display.show();
+        $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
+        $wrap.find( '.uwgs-alt-feedback' ).text( '' ).removeClass( 'success error' );
+    } );
+
+    // -----------------------------------------------------------------
+    // KEYBOARD
+    // -----------------------------------------------------------------
+
+    $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
+        if ( 13 === e.which ) {
+            e.preventDefault();
+            $( this ).closest( '.uwgs-alt-wrap' ).find( '.uwgs-alt-save-btn' ).trigger( 'click' );
+        }
+        if ( 27 === e.which ) {
+            $( this ).closest( '.uwgs-alt-wrap' ).find( '.uwgs-alt-cancel-btn' ).trigger( 'click' );
+        }
+    } );
+
+    // -----------------------------------------------------------------
+    // SAVE
+    // -----------------------------------------------------------------
+
+    $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
+        var $btn      = $( this );
+        var $wrap     = $btn.closest( '.uwgs-alt-wrap' );
+        var postId    = $wrap.data( 'post-id' );
+        var nonce     = $btn.data( 'nonce' );
+        var altText   = $wrap.find( '.uwgs-alt-input' ).val().trim();
+        var $spinner  = $wrap.find( '.uwgs-alt-spinner' );
+        var $feedback = $wrap.find( '.uwgs-alt-feedback' );
+
+        $btn.prop( 'disabled', true );
+        $spinner.addClass( 'is-active' ).attr( 'aria-hidden', 'false' );
+        $feedback.text( '' ).removeClass( 'success error' );
+
+        $.ajax( {
+            url: ajaxUrl, type: 'POST',
+            data: { action: 'uwgs_save_alt_text', post_id: postId, alt_text: altText, nonce: nonce },
+            success: function( response ) {
+                if ( response.success ) {
+                    var $display = $wrap.find( '.uwgs-alt-display' );
+                    var $value   = $display.find( '.uwgs-alt-value' );
+
+                    if ( altText.length && ! response.data.needs_attention ) {
+                        $value.text( altText ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
+                        $wrap.find( '.uwgs-alt-new-flag' ).remove();
+                        delete suggestions[ postId ];
+                    } else if ( altText.length && response.data.needs_attention ) {
+                        $value.text( '⚠ ' + altText ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
+                    } else {
+                        $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
+                    }
+
+                    $wrap.find( '.uwgs-alt-editor' ).hide();
+                    $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
+                    $display.show();
+                    $display.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
+                    $feedback.text( i18n.saved || 'Saved.' ).addClass( 'success' );
+                    setTimeout( function() { $feedback.text( '' ).removeClass( 'success' ); }, 3000 );
+                } else {
+                    $feedback.text( response.data || i18n.saveFailed ).addClass( 'error' );
+                }
+            },
+            error: function() { $feedback.text( i18n.requestFailed ).addClass( 'error' ); },
+            complete: function() {
+                $btn.prop( 'disabled', false );
+                $spinner.removeClass( 'is-active' ).attr( 'aria-hidden', 'true' );
+            }
+        } );
+    } );
+
+} );
+JS;
+
+        wp_add_inline_script( 'jquery', $js );
+    }
+
+    // =========================================================================
+    // UPLOAD PAGE ASSETS
+    // =========================================================================
+
+    private function enqueue_upload_page_assets() {
+
+        $i18n = array(
+            'editPrompt' => __( 'Upload complete — click here to edit and add alt text', 'uwgs-alt-text-tool' ),
+        );
+
+        wp_add_inline_script( 'jquery', 'var uwgsUploadI18n = '. wp_json_encode( $i18n ). ';' );
+
+        $js = <<<'JS'
+( function() {
+    'use strict';
+    var i18n       = ( typeof uwgsUploadI18n !== 'undefined' ) ? uwgsUploadI18n : {};
+    var promptText = i18n.editPrompt || 'Upload complete — click here to edit and add alt text';
+
+    function processRow( row ) {
+        if ( ! row ) { return; }
+        var editLink = row.querySelector( 'a[href*="action=edit"]' )
+                    || row.querySelector( '.edit-attachment a' )
+                    || row.querySelector( '.media-item-info a' );
+        if ( ! editLink || editLink.getAttribute( 'data-uwgs-updated' ) ) { return; }
+        if ( row.querySelector( '.upload-error' ) ) { return; }
+        editLink.textContent = promptText;
+        editLink.setAttribute( 'data-uwgs-updated', '1' );
+        editLink.style.fontWeight = '600';
+        editLink.style.color      = '#856404';
+    }
+
+    function observeUploadList() {
+        var container = document.getElementById( 'media-items' );
+        if ( ! container ) { return; }
+        var observer = new MutationObserver( function( mutations ) {
+            mutations.forEach( function( mutation ) {
+                mutation.addedNodes.forEach( function( node ) {
+                    if ( node.nodeType !== 1 ) { return; }
+                    if ( node.id && node.id.indexOf( 'media-item-' ) === 0 ) { processRow( node ); }
+                    var rows = node.querySelectorAll ? node.querySelectorAll( '[id^="media-item-"]' ) : [];
+                    rows.forEach( processRow );
+                } );
+                if ( mutation.type === 'childList' && mutation.target && mutation.target.closest ) {
+                    var row = mutation.target.closest( '[id^="media-item-"]' );
+                    if ( row ) { processRow( row ); }
+                }
+            } );
+        } );
+        observer.observe( container, { childList: true, subtree: true } );
+    }
+
+    if ( document.readyState === 'loading' ) {
+        document.addEventListener( 'DOMContentLoaded', observeUploadList );
+    } else {
+        observeUploadList();
+    }
+} )();
+JS;
+
+        wp_add_inline_script( 'jquery', $js, 'after' );
+    }
+
+    // =========================================================================
+    // ATTACHMENT EDIT SCREEN ASSETS
+    // =========================================================================
+
+    private function enqueue_attachment_edit_assets( $post_id ) {
+
+        $alt         = get_post_meta( $post_id, self::META_KEY, true );
+        $caption     = get_post_field( 'post_excerpt', $post_id );
+        $should_copy = ( empty( $alt ) && ! empty( $caption ) );
+
+        $css = '.uwgs-attachment-alt-warning {
+                display:none; margin-top:6px; padding:8px 10px;
+                background:#fff3cd; border-left:4px solid #ffc107;
+                color:#856404; font-size:13px; border-radius:0 3px 3px 0;
+            }.uwgs-attachment-alt-warning.visible { display:block; }
+            #attachment_alt.uwgs-field-highlight {
+                border-color:#c62828 !important;
+                box-shadow:0 0 0 1px #c62828 !important;
+            }.uwgs-caption-copy-notice {
+                display:flex; align-items:flex-start; gap:8px; margin-top:6px;
+                padding:7px 10px; background:#fff3cd; border-left:4px solid #ffc107;
+                color:#856404; font-size:12px; line-height:1.5; border-radius:0 3px 3px 0;
+            }.uwgs-caption-copy-notice button {
+                background:none; border:none; padding:0; cursor:pointer;
+                color:#856404; font-size:14px; line-height:1; flex-shrink:0; margin-left:auto;
+            }.uwgs-caption-copy-notice button:hover { color:#5a4000; }
+        ';
+
+        wp_register_style( 'uwgs-attachment-edit', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-attachment-edit' );
+        wp_add_inline_style( 'uwgs-attachment-edit', $css );
+
+        $i18n = array(
+            'warningText'   => __( '⚠ This image has no alt text. Alt text is required for accessibility. Please add a description before saving, or confirm this image is decorative by clicking Save again.', 'uwgs-alt-text-tool' ),
+            'captionCopied' => __( 'Alt text copied from caption — please review and edit if needed before saving.', 'uwgs-alt-text-tool' ),
+            'dismissNotice' => __( 'Dismiss', 'uwgs-alt-text-tool' ),
+        );
+
+        $data = array(
+            'i18n'         => $i18n,
+            'shouldCopy'   => $should_copy,
+            'captionValue' => $should_copy ? sanitize_text_field( $caption ) : '',
+        );
+
+        wp_add_inline_script( 'jquery', 'var uwgsAttachData = '. wp_json_encode( $data ). ';' );
+
+        $js = <<<'JS'
+jQuery( function( $ ) {
+
+    var data       = ( typeof uwgsAttachData !== 'undefined' ) ? uwgsAttachData : {};
+    var i18n       = data.i18n         || {};
+    var shouldCopy = data.shouldCopy   || false;
+    var capVal     = data.captionValue || '';
+    var $altField  = $( '#attachment_alt' );
+    var $submitBtn = $( '#publish, input[name="save"]' );
+    var warned     = false;
+
+    if ( ! $altField.length ) { return; }
+
+    if ( shouldCopy && capVal ) {
+        $altField.val( capVal );
+        var $notice = $( '<div>' ).addClass( 'uwgs-caption-copy-notice' ).attr( { 'role': 'note', 'aria-live': 'polite' } );
+        var $msg = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
+        var $dismiss = $( '<button>' ).attr( { 'type': 'button', 'aria-label': i18n.dismissNotice || 'Dismiss', 'title': i18n.dismissNotice || 'Dismiss' } ).html( '✕' ).on( 'click', function() { $notice.remove(); } );
+        $notice.append( $msg ).append( $dismiss );
+        $altField.after( $notice );
+        $altField.one( 'input', function() { $notice.remove(); } );
+    }
+
+    var $warning = $( '<div>' ).addClass( 'uwgs-attachment-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).text( i18n.warningText || '⚠ This image has no alt text. Please add a description or click Save again to proceed.' );
+    $altField.after( $warning );
+
+    $altField.on( 'input', function() {
+        if ( $( this ).val().trim().length ) {
+            $( this ).removeClass( 'uwgs-field-highlight' );
+            $warning.removeClass( 'visible' );
+            warned = false;
+        }
+    } );
+
+    $submitBtn.on( 'click', function( e ) {
+        if ( $altField.val().trim().length ) { warned = false; return true; }
+        if ( ! warned ) {
+            e.preventDefault(); warned = true;
+            $altField.addClass( 'uwgs-field-highlight' );
+            $warning.addClass( 'visible' );
+            $altField.trigger( 'focus' );
+            return false;
+        }
+        warned = false;
+        return true;
+    } );
+
+} );
+JS;
+
+        wp_add_inline_script( 'jquery', $js );
+    }
+
+    // =========================================================================
+    // CLASSIC EDITOR + ALL NON-BLOCK-EDITOR POST TYPES: PRE-SAVE SCAN
+    // =========================================================================
+
+    private function enqueue_classic_presave_assets() {
+
+        // FIX v2.3.2: corrected CSS child selectors — space (descendant) not dot (compound)
+        $css = '
+            #uwgs-inline-notice {
+                display:none;
+                margin:8px 0 16px;
+                padding:10px 14px;
+                background:#fff3cd;
+                border-left:4px solid #ffc107;
+                color:#856404;
+                font-size:13px;
+                line-height:1.5;
+                border-radius:0 3px 3px 0;
+            }
+            #uwgs-inline-notice.visible {
+                display:flex;
+                align-items:center;
+                justify-content:space-between;
+                gap:12px;
+            }
+            #uwgs-inline-notice.uwgs-notice-text { flex:1; }
+            #uwgs-inline-notice.uwgs-notice-dismiss {
+                background:none; border:none; cursor:pointer;
+                color:#856404; font-size:16px; padding:0;
+                flex-shrink:0; line-height:1;
+            }
+            #uwgs-inline-notice.uwgs-notice-dismiss:hover { color:#5a4000; }
+            #uwgs-presave-warning {
+                display:none;
+                position:fixed; top:32px; left:50%; transform:translateX(-50%);
+                z-index:99999; min-width:320px; max-width:520px;
+                padding:16px 20px; background:#fff3cd; border:2px solid #ffc107;
+                border-radius:4px; color:#856404; font-size:13px; line-height:1.6;
+                box-shadow:0 4px 12px rgba(0,0,0,0.15);
+            }
+            #uwgs-presave-warning.visible { display:block; }
+            #uwgs-presave-warning strong  { display:block; margin-bottom:8px; font-size:14px; }
+            #uwgs-presave-warning p       { margin:0 0 12px; }
+            #uwgs-presave-warning.uwgs-warning-actions { display:flex; gap:8px; align-items:center; }
+        ';
+
+        wp_register_style( 'uwgs-classic-presave', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-classic-presave' );
+        wp_add_inline_style( 'uwgs-classic-presave', $css );
+
+        $data = array(
+            'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
+            'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
+            'i18n'          => array(
+                'noticeContent'       => __( '⚠ One or more images in this post are missing alt text. Please add descriptions before publishing.', 'uwgs-alt-text-tool' ),
+                'noticeFeatured'      => __( '⚠ The featured image is missing alt text. Please add a description before publishing.', 'uwgs-alt-text-tool' ),
+                'noticeBoth'          => __( '⚠ Images and the featured image in this post are missing alt text. Please add descriptions before publishing.', 'uwgs-alt-text-tool' ),
+                'warningTitle'        => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
+                'warningBodyContent'  => __( 'One or more images in this post are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
+                'warningBodyFeatured' => __( 'The featured image for this post is missing alt text. Please edit the featured image and add a description, or click "Save anyway" if it is decorative.', 'uwgs-alt-text-tool' ),
+                'warningBodyBoth'     => __( 'One or more images and the featured image are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
+                'saveAnyway'          => __( 'Save anyway', 'uwgs-alt-text-tool' ),
+                'goBack'              => __( 'Go back and fix', 'uwgs-alt-text-tool' ),
+                'dismiss'             => __( 'Dismiss', 'uwgs-alt-text-tool' ),
+            ),
+        );
+
+        wp_add_inline_script( 'jquery', 'var uwgsPresaveData = '. wp_json_encode( $data ). ';' );
+
+        $js = <<<'JS'
+( function() {
+
+    'use strict';
+
+    var data    = ( typeof uwgsPresaveData !== 'undefined' ) ? uwgsPresaveData : {};
+    var ajaxUrl = data.ajaxUrl       || '';
+    var nonce   = data.altCheckNonce || '';
+    var i18n    = data.i18n          || {};
+
+    var warningEl       = null;
+    var noticeEl        = null;
+    var saveTarget      = null;
+    var saving          = false;
+    var noticeDismissed = false;
+
+    function contentHasMissingAlt() {
+        var allContent = [];
+
+        if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
+            tinyMCE.editors.forEach( function( editor ) {
+                if ( editor && editor.getContent ) {
+                    try { allContent.push( editor.getContent() ); } catch(e) {}
+                }
+            } );
+        }
+
+        var textarea = document.getElementById( 'content' );
+        if ( textarea && textarea.value ) {
+            allContent.push( textarea.value );
+        }
+
+        if ( ! allContent.length ) { return false; }
+
+        for ( var c = 0; c < allContent.length; c++ ) {
+            if ( ! allContent[c] ) { continue; }
+            if ( allContent[c].indexOf( '<img' ) === -1 ) { continue; }
+            var tmp = document.createElement( 'div' );
+            tmp.innerHTML = allContent[c];
+            var imgs = tmp.querySelectorAll( 'img' );
+            for ( var i = 0; i < imgs.length; i++ ) {
+                if ( imgs[i].getAttribute( 'data-mce-bogus' ) ) { continue; }
+                if ( ( imgs[i].getAttribute( 'alt' ) || '' ).trim() === '' ) { return true; }
+            }
+        }
+
+        return false;
+    }
+
+    function getFeaturedImageId() {
+        var el = document.getElementById( '_thumbnail_id' );
+        if ( el ) {
+            var val = parseInt( el.value, 10 );
+            if ( val && val > 0 ) { return val; }
+        }
+        var candidates = document.querySelectorAll(
+            'input[type="hidden"][name*="thumbnail_id"],' +
+            'input[type="hidden"][id*="thumbnail_id"],' +
+            'input[type="hidden"][name*="featured_image"],' +
+            'input[type="hidden"][id*="featured_image"],' +
+            'input[type="hidden"][name*="featured_media"],' +
+            'input[type="hidden"][id*="featured_media"]'
+        );
+        for ( var i = 0; i < candidates.length; i++ ) {
+            var id = parseInt( candidates[i].value, 10 );
+            if ( id && id > 0 ) { return id; }
+        }
+        return 0;
+    }
+
+    function featuredImageMissingAlt() {
+        return new Promise( function( resolve ) {
+            var thumbnailId = getFeaturedImageId();
+            if ( ! thumbnailId ) { resolve( false ); return; }
+            var formData = new FormData();
+            formData.append( 'action',        'uwgs_get_attachment_alt' );
+            formData.append( 'nonce',         nonce );
+            formData.append( 'attachment_id', thumbnailId );
+            fetch( ajaxUrl, { method: 'POST', body: formData } ).then( function( r ) { return r.json(); } ).then( function( response ) {
+                    resolve( response.success && response.data.needs_attention );
+                } ).catch( function() { resolve( false ); } );
+        } );
+    }
+
+    function buildNoticeBar() {
+        noticeEl = document.createElement( 'div' );
+        noticeEl.id = 'uwgs-inline-notice';
+        noticeEl.setAttribute( 'role',     'status' );
+        noticeEl.setAttribute( 'aria-live','polite' );
+
+        var textSpan = document.createElement( 'span' );
+        textSpan.className = 'uwgs-notice-text';
+        noticeEl.appendChild( textSpan );
+
+        var dismissBtn = document.createElement( 'button' );
+        dismissBtn.type      = 'button';
+        dismissBtn.className = 'uwgs-notice-dismiss';
+        dismissBtn.setAttribute( 'aria-label', i18n.dismiss || 'Dismiss' );
+        dismissBtn.textContent = '✕';
+        dismissBtn.addEventListener( 'click', function() {
+            noticeEl.classList.remove( 'visible' );
+            noticeDismissed = true;
+        } );
+        noticeEl.appendChild( dismissBtn );
+
+        var anchor = document.getElementById( 'titlediv' )
+                  || document.getElementById( 'post-body-content' );
+        if ( anchor && anchor.parentNode ) {
+            anchor.parentNode.insertBefore( noticeEl, anchor.nextSibling );
+        } else {
+            document.body.appendChild( noticeEl );
+        }
+    }
+
+    function updateNoticeBar( hasContent, hasFeatured ) {
+        if ( ! noticeEl ) { return; }
+
+        if ( ! hasContent && ! hasFeatured ) {
+            noticeEl.classList.remove( 'visible' );
+            noticeDismissed = false;
+            return;
+        }
+
+        if ( noticeDismissed ) { return; }
+
+        var textSpan = noticeEl.querySelector( '.uwgs-notice-text' );
+        if ( ! textSpan ) { return; }
+
+        var msg;
+        if ( hasContent && hasFeatured ) {
+            msg = i18n.noticeBoth     || '⚠ Images and the featured image are missing alt text.';
+        } else if ( hasFeatured ) {
+            msg = i18n.noticeFeatured || '⚠ The featured image is missing alt text.';
+        } else {
+            msg = i18n.noticeContent  || '⚠ One or more images are missing alt text.';
+        }
+
+        textSpan.textContent = msg;
+        noticeEl.classList.add( 'visible' );
+    }
+
+    function refreshNoticeBar( afterMediaInsert ) {
+        if ( afterMediaInsert ) { noticeDismissed = false; }
+        var hasContent = contentHasMissingAlt();
+        featuredImageMissingAlt().then( function( hasFeatured ) {
+            updateNoticeBar( hasContent, hasFeatured );
+        } );
+    }
+
+    function buildWarningPanel() {
+        warningEl = document.createElement( 'div' );
+        warningEl.id = 'uwgs-presave-warning';
+        warningEl.setAttribute( 'role',       'alertdialog' );
+        warningEl.setAttribute( 'aria-live',  'assertive' );
+        warningEl.setAttribute( 'aria-modal', 'false' );
+        warningEl.setAttribute( 'tabindex',   '-1' );
+        document.body.appendChild( warningEl );
+    }
+
+    function showWarning( hasContent, hasFeatured ) {
+        warningEl.innerHTML = '';
+
+        var title = document.createElement( 'strong' );
+        title.textContent = i18n.warningTitle || '⚠ Accessibility: Images missing alt text';
+
+        var bodyText;
+        if ( hasContent && hasFeatured ) {
+            bodyText = i18n.warningBodyBoth     || 'Images and the featured image are missing alt text.';
+        } else if ( hasFeatured ) {
+            bodyText = i18n.warningBodyFeatured || 'The featured image is missing alt text.';
+        } else {
+            bodyText = i18n.warningBodyContent  || 'One or more images are missing alt text.';
+        }
+
+        var body = document.createElement( 'p' );
+        body.textContent = bodyText;
+
+        var actions = document.createElement( 'div' );
+        actions.className = 'uwgs-warning-actions';
+
+        var goBack = document.createElement( 'button' );
+        goBack.type = 'button'; goBack.className = 'button button-primary';
+        goBack.textContent = i18n.goBack || 'Go back and fix';
+        goBack.addEventListener( 'click', function() {
+            hideWarning();
+            if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.activeEditor ) {
+                tinyMCE.activeEditor.focus();
+            }
+        } );
+
+        var saveAnyway = document.createElement( 'button' );
+        saveAnyway.type = 'button'; saveAnyway.className = 'button';
+        saveAnyway.textContent = i18n.saveAnyway || 'Save anyway';
+        saveAnyway.addEventListener( 'click', function() {
+            hideWarning();
+            saving = true;
+            if ( saveTarget ) { saveTarget.click(); }
+        } );
+
+        actions.appendChild( goBack );
+        actions.appendChild( saveAnyway );
+        warningEl.appendChild( title );
+        warningEl.appendChild( body );
+        warningEl.appendChild( actions );
+        warningEl.classList.add( 'visible' );
+        warningEl.focus();
+    }
+
+    function hideWarning() {
+        warningEl.classList.remove( 'visible' );
+        warningEl.innerHTML = '';
+        saveTarget = null;
+        saving = false;
+    }
+
+    function interceptSaveButtons() {
+        var saveIds = [ 'save', 'save-post', 'publish' ];
+        saveIds.forEach( function( id ) {
+            var btn = document.getElementById( id );
+            if ( ! btn ) { return; }
+
+            btn.addEventListener( 'click', function( e ) {
+                if ( saving ) { saving = false; return; }
+                if ( warningEl.classList.contains( 'visible' ) ) { return; }
+
+                e.preventDefault();
+                e.stopImmediatePropagation();
+                saveTarget = btn;
+
+                var hasContent = contentHasMissingAlt();
+
+                featuredImageMissingAlt().then( function( hasFeatured ) {
+                    if ( hasContent || hasFeatured ) {
+                        showWarning( hasContent, hasFeatured );
+                    } else {
+                        saving = true;
+                        btn.
