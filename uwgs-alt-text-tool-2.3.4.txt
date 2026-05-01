@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.3.7
+ * Version:           2.3.8
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.3.7';
+    const VERSION                = '2.3.8';
     const BULK_CONFIRM_THRESHOLD = 20;
 
     const LOW_QUALITY_WORDS = array(
@@ -373,7 +373,6 @@ class UWGS_Alt_Text_Tool {
         update_post_meta( $post_id, self::META_KEY, $alt_text );
         delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
 
-        // Return the saved value as truth — JS uses this, not its own copy
         wp_send_json_success( array(
             'alt_text'        => $alt_text,
             'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
@@ -402,15 +401,14 @@ class UWGS_Alt_Text_Tool {
             wp_send_json_error( __( 'No updates provided.', 'uwgs-alt-text-tool' ) );
         }
 
-        $updated     = array();
-        $failed      = array();
-        $skipped     = array();
-        // Return the exact saved value per ID so JS can use server as truth
-        $saved_values = array();
+        $updated      = array();
+        $failed       = array();
+        $skipped      = array();
+        $saved_values = array(); // string-keyed: '123' => 'alt text'
         $ext_pattern  = '/\.('. implode( '|', self::IMAGE_EXTENSIONS ). ')$/i';
 
         foreach ( $raw_updates as $item ) {
-            $post_id  = isset( $item['id'] )  ? absint( $item['id'] )                                    : 0;
+            $post_id  = isset( $item['id'] )  ? absint( $item['id'] )                                     : 0;
             $alt_text = isset( $item['alt'] ) ? trim( sanitize_text_field( wp_unslash( $item['alt'] ) ) ) : '';
 
             if ( ! $post_id || empty( $alt_text ) ) { $failed[] = $post_id; continue; }
@@ -435,8 +433,9 @@ class UWGS_Alt_Text_Tool {
 
             update_post_meta( $post_id, self::META_KEY, $alt_text );
             delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
-            $updated[]                    = $post_id;
-            $saved_values[ $post_id ]     = $alt_text; // server confirms exact saved value
+            $updated[]                         = $post_id;
+            // Use string key so JS object lookup is consistent
+            $saved_values[ (string) $post_id ] = $alt_text;
         }
 
         self::clear_stats_cache();
@@ -445,7 +444,7 @@ class UWGS_Alt_Text_Tool {
             'updated'      => $updated,
             'failed'       => $failed,
             'skipped'      => $skipped,
-            'saved_values' => $saved_values, // JS uses this as source of truth
+            'saved_values' => $saved_values,
             'counts'       => array(
                 'updated' => count( $updated ),
                 'failed'  => count( $failed ),
@@ -714,9 +713,9 @@ class UWGS_Alt_Text_Tool {
         wp_enqueue_style( 'uwgs-alt-text-tool' );
         wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        // Build suggestions and seed currentAlt from PHP-rendered values
-        $suggestions = array();
-        $current_alts = array(); // PHP-seeded source of truth for JS
+        // Build suggestions and currentAlts — both use string keys for JS consistency
+        $suggestions  = array();
+        $current_alts = array();
 
         global $wp_query;
         if ( $wp_query && ! empty( $wp_query->posts ) ) {
@@ -727,8 +726,11 @@ class UWGS_Alt_Text_Tool {
 
                 $alt = get_post_meta( $post_id, self::META_KEY, true );
 
-                // Seed currentAlt for every image — JS uses this as truth
-                $current_alts[ $post_id ] = trim( (string) $alt );
+                // String key — matches JS object key type
+                $key = (string) $post_id;
+
+                // Seed currentAlts for every image on the page
+                $current_alts[ $key ] = trim( (string) $alt );
 
                 // Only build suggestions for images needing attention
                 if ( ! empty( $alt ) && ! $this->uwgs_alt_needs_attention( $alt ) ) { continue; }
@@ -736,9 +738,9 @@ class UWGS_Alt_Text_Tool {
                 $caption  = get_post_field( 'post_excerpt', $post_id );
                 $filename = get_post_field( 'post_title', $post_id );
                 if ( ! empty( trim( $caption ) ) ) {
-                    $suggestions[ $post_id ] = array( 'type' => 'caption', 'value' => sanitize_text_field( $caption ) );
+                    $suggestions[ $key ] = array( 'type' => 'caption', 'value' => sanitize_text_field( $caption ) );
                 } else {
-                    $suggestions[ $post_id ] = array( 'type' => 'filename', 'value' => sanitize_text_field( $filename ) );
+                    $suggestions[ $key ] = array( 'type' => 'filename', 'value' => sanitize_text_field( $filename ) );
                 }
             }
         }
@@ -746,7 +748,7 @@ class UWGS_Alt_Text_Tool {
         $data = array(
             'ajaxUrl'        => admin_url( 'admin-ajax.php' ),
             'suggestions'    => $suggestions,
-            'currentAlts'    => $current_alts, // PHP-seeded source of truth
+            'currentAlts'    => $current_alts,
             'bulkNonce'      => wp_create_nonce( self::NONCE_BULK_SAVE ),
             'bulkThreshold'  => self::BULK_CONFIRM_THRESHOLD,
             'isFilterActive' => ( isset( $_GET['alt_filter'] ) && 'attention' === sanitize_key( $_GET['alt_filter'] ) ),
@@ -796,18 +798,29 @@ jQuery( function( $ ) {
     // -----------------------------------------------------------------
     // SOURCE OF TRUTH: currentAlts
     //
-    // Seeded from PHP (database values at page load).
-    // Updated immediately on every successful save — single or bulk.
-    // The edit button ALWAYS reads from currentAlts, never from
-    // suggestedAlt or the stale PHP-rendered input value.
-    // Server response is treated as truth after every save.
+    // Seeded from PHP with string keys matching post IDs.
+    // ALL reads and writes use String(postId) to guarantee key consistency.
+    // This is the only place the current saved alt text lives in JS.
+    // Never read from suggestedAlt or the stale PHP-rendered DOM input.
     // -----------------------------------------------------------------
-    var currentAlts = data.currentAlts || {};
+    var currentAlts = {};
 
-    // -----------------------------------------------------------------
-    // BULK SAVE LOCK
-    // Prevents editing during async bulk save and prevents duplicate clicks.
-    // -----------------------------------------------------------------
+    // Seed from PHP data — normalize all keys to strings
+    if ( data.currentAlts && typeof data.currentAlts === 'object' ) {
+        Object.keys( data.currentAlts ).forEach( function( k ) {
+            currentAlts[ String( k ) ] = data.currentAlts[ k ];
+        } );
+    }
+
+    // Helper: always read/write currentAlts with string key
+    function getCurrentAlt( postId ) {
+        return currentAlts[ String( postId ) ] || '';
+    }
+    function setCurrentAlt( postId, value ) {
+        currentAlts[ String( postId ) ] = value;
+    }
+
+    // Bulk save lock
     var isBulkSaving = false;
 
     var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
@@ -869,9 +882,10 @@ jQuery( function( $ ) {
         return 'good';
     }
 
+    // Pre-classify all suggestions — use string keys
     var classified = {};
-    Object.keys( suggestions ).forEach( function( postId ) {
-        classified[ postId ] = classifySuggestion( suggestions[ postId ] );
+    Object.keys( suggestions ).forEach( function( k ) {
+        classified[ String( k ) ] = classifySuggestion( suggestions[ k ] );
     } );
 
     // -----------------------------------------------------------------
@@ -881,8 +895,8 @@ jQuery( function( $ ) {
     var $bulkBar = null, lastFailed = [];
 
     function countRemainingNeedingReview() {
-        return Object.keys( classified ).filter( function( id ) {
-            return classified[ id ] === 'weak' || classified[ id ] === 'invalid';
+        return Object.keys( classified ).filter( function( k ) {
+            return classified[ k ] === 'weak' || classified[ k ] === 'invalid';
         } ).length;
     }
 
@@ -893,8 +907,8 @@ jQuery( function( $ ) {
     function buildBulkBar() {
         if ( ! isFilterActive ) { return; }
 
-        var goodCount = Object.keys( classified ).filter( function( id ) {
-            return classified[ id ] === 'good';
+        var goodCount = Object.keys( classified ).filter( function( k ) {
+            return classified[ k ] === 'good';
         } ).length;
 
         $bulkBar = $( '<div id="uwgs-bulk-bar" role="region" aria-label="' +
@@ -926,7 +940,7 @@ jQuery( function( $ ) {
     }
 
     function handleBulkApply( $btn, $feedback, count ) {
-        if ( isBulkSaving ) { return; } // race condition guard
+        if ( isBulkSaving ) { return; }
 
         if ( count >= bulkThreshold ) {
             var confirmMsg = ( i18n.bulkConfirm || 'Apply %d suggestions? This cannot be undone.' ).replace( '%d', count );
@@ -934,18 +948,17 @@ jQuery( function( $ ) {
         }
 
         var updates = [];
-        Object.keys( classified ).forEach( function( postId ) {
-            if ( classified[ postId ] !== 'good' ) { return; }
-            var suggestion = suggestions[ postId ];
+        Object.keys( classified ).forEach( function( k ) {
+            if ( classified[ k ] !== 'good' ) { return; }
+            var suggestion = suggestions[ k ];
             if ( ! suggestion ) { return; }
             var altText = suggestion.type === 'caption' ? suggestion.value : sanitizeFilename( suggestion.value );
             if ( validateAltTextInput( altText ) ) { return; }
-            if ( altText ) { updates.push( { id: parseInt( postId, 10 ), alt: altText } ); }
+            if ( altText ) { updates.push( { id: parseInt( k, 10 ), alt: altText } ); }
         } );
 
         if ( ! updates.length ) { return; }
 
-        // Lock: disable button and all edit buttons during save
         isBulkSaving = true;
         $btn.prop( 'disabled', true ).text( '…' );
         $feedback.text( '' ).removeClass( 'success error partial' );
@@ -960,32 +973,29 @@ jQuery( function( $ ) {
                     var savedValues = response.data.saved_values || {};
                     lastFailed      = response.data.failed || [];
 
-                    // Update UI using SERVER-CONFIRMED values as truth
+                    // Update using server-confirmed values — string key lookup
                     response.data.updated.forEach( function( postId ) {
-                        // Use the value the server actually saved — not our local copy
-                        var savedAlt = savedValues[ postId ] || '';
+                        var key      = String( postId );
+                        var savedAlt = savedValues[ key ] || '';
                         if ( ! savedAlt ) { return; }
 
-                        var $wrap = $( '.uwgs-alt-wrap[data-post-id="' + postId + '"]' );
+                        var $wrap = $( '.uwgs-alt-wrap[data-post-id="' + key + '"]' );
                         if ( ! $wrap.length ) { return; }
 
-                        // 1. Update currentAlts — this is now the source of truth
-                        currentAlts[ postId ] = savedAlt;
+                        // Update currentAlts — source of truth
+                        setCurrentAlt( key, savedAlt );
 
-                        // 2. Update display span
+                        // Update display
                         $wrap.find( '.uwgs-alt-value' ).text( savedAlt ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
                         $wrap.find( '.uwgs-alt-new-flag' ).remove();
 
-                        // 3. Update input field to match saved value
+                        // Update input field
                         $wrap.find( '.uwgs-alt-input' ).val( savedAlt );
 
-                        // 4. Remove from classified/suggestions — item is resolved
-                        delete classified[ postId ];
-                        delete suggestions[ postId ];
+                        // Remove from classified/suggestions — string key
+                        delete classified[ key ];
+                        delete suggestions[ key ];
                     } );
-
-                    // Do NOT update currentAlts for failed items — they remain stale
-                    // so the editor sees the correct (unsaved) state
 
                     var reviewCount = countRemainingNeedingReview();
                     var msg = '';
@@ -1008,25 +1018,22 @@ jQuery( function( $ ) {
                         $feedback.after( $retry );
                     }
 
-                    var remaining = Object.keys( classified ).filter( function( id ) { return classified[ id ] === 'good'; } ).length;
+                    var remaining = Object.keys( classified ).filter( function( k ) { return classified[ k ] === 'good'; } ).length;
                     if ( remaining > 0 ) {
                         $btn.prop( 'disabled', false ).text( ( i18n.bulkApplyCount || 'Apply %d high-quality suggestions' ).replace( '%d', remaining ) );
                     } else {
                         $btn.prop( 'disabled', true ).text( i18n.bulkApplyLabel || 'Apply good suggestions' );
                     }
                 } else {
-                    // AJAX error — do NOT update any UI state
                     $feedback.text( i18n.bulkFailed || 'Bulk update failed.' ).addClass( 'error' );
                     $btn.prop( 'disabled', false ).text( i18n.bulkApplyLabel || 'Apply good suggestions' );
                 }
             },
             error: function() {
-                // Network error — do NOT update any UI state
                 $feedback.text( i18n.bulkFailed || 'Bulk update failed.' ).addClass( 'error' );
                 $btn.prop( 'disabled', false ).text( i18n.bulkApplyLabel || 'Apply good suggestions' );
             },
             complete: function() {
-                // Always unlock, regardless of success or failure
                 isBulkSaving = false;
                 setEditButtonsDisabled( false );
             }
@@ -1038,20 +1045,19 @@ jQuery( function( $ ) {
     // -----------------------------------------------------------------
     // OPEN INLINE EDITOR
     //
-    // ALWAYS reads input value from currentAlts — the single source of truth.
-    // Never reads from suggestedAlt or the stale PHP-rendered DOM value.
-    // If bulk save is in progress, block editing with a message.
+    // ALWAYS reads from currentAlts (source of truth) using string key.
+    // Suggestions only shown if currentAlt is empty.
+    // Never reads from suggestedAlt or stale DOM value.
     // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
-        // Block editing during bulk save
         if ( isBulkSaving ) {
             alert( i18n.savingInProgress || 'Saving in progress — please wait.' );
             return;
         }
 
         var $wrap   = $( this ).closest( '.uwgs-alt-wrap' );
-        var postId  = $wrap.data( 'post-id' );
+        var postId  = String( $wrap.data( 'post-id' ) ); // always string
         var $editor = $wrap.find( '.uwgs-alt-editor' );
         var $input  = $editor.find( '.uwgs-alt-input' );
 
@@ -1059,48 +1065,47 @@ jQuery( function( $ ) {
         $editor.show();
         $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
 
-        // Always set input from currentAlts — source of truth
-        // currentAlts is seeded from PHP and updated after every save
-        var currentVal = ( currentAlts[ postId ] !== undefined )
-            ? currentAlts[ postId ]
-            : $input.val().trim(); // fallback: existing DOM value
+        // Read current saved value — source of truth
+        var currentVal = getCurrentAlt( postId );
 
+        // Set input from currentAlts first
         $input.val( currentVal );
 
-        var confidence = classified[ postId ] || null;
-        var suggestion = suggestions[ postId ] || null;
         var $primaryLi = $editor.find( '.uwgs-guidance-primary' );
 
-        // Only show suggestion hint if the field is currently empty
-        // (i.e. no saved value yet) — never overwrite a saved value with a suggestion
-        if ( ! currentVal && suggestion ) {
+        // Only show suggestion if there is no saved value
+        if ( ! currentVal ) {
+            var confidence = classified[ postId ] || null;
+            var suggestion = suggestions[ postId ] || null;
 
-            if ( suggestion.type === 'caption' ) {
-                $input.val( suggestion.value );
-                showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
-                $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
+            if ( suggestion ) {
+                if ( suggestion.type === 'caption' ) {
+                    $input.val( suggestion.value );
+                    showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
+                    $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
 
-            } else if ( confidence === 'good' ) {
-                var sanitized = sanitizeFilename( suggestion.value );
-                $input.val( sanitized );
-                showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
-                $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
+                } else if ( confidence === 'good' ) {
+                    var sanitized = sanitizeFilename( suggestion.value );
+                    $input.val( sanitized );
+                    showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
+                    $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
 
-            } else if ( confidence === 'weak' ) {
-                var sanitizedWeak = sanitizeFilename( suggestion.value );
-                $input.val( sanitizedWeak );
-                showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
-                $primaryLi.text( i18n.guidanceTooShort || 'This may be too brief — consider adding more detail.' );
+                } else if ( confidence === 'weak' ) {
+                    var sanitizedWeak = sanitizeFilename( suggestion.value );
+                    $input.val( sanitizedWeak );
+                    showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
+                    $primaryLi.text( i18n.guidanceTooShort || 'This may be too brief — consider adding more detail.' );
 
+                } else {
+                    $input.val( '' );
+                    showHint( $input, i18n.invalidSuggest || 'This looks like a filename or URL. Please write a meaningful description.', 'low-quality' );
+                    $primaryLi.text( i18n.guidanceFilename || 'This looks like a filename. Describe what the image shows.' );
+                }
             } else {
-                // Invalid suggestion — leave input empty, show prompt
-                $input.val( '' );
-                showHint( $input, i18n.invalidSuggest || 'This looks like a filename or URL. Please write a meaningful description.', 'low-quality' );
-                $primaryLi.text( i18n.guidanceFilename || 'This looks like a filename. Describe what the image shows.' );
+                $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
             }
-
         } else {
-            // Has a saved value (currentVal) or no suggestion — just show guidance
+            // Has a saved value — just show default guidance, no suggestion
             $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
         }
 
@@ -1170,18 +1175,16 @@ jQuery( function( $ ) {
         if ( targetIdx < 0 || targetIdx >= $allWraps.length ) { $currentWrap.find( '.uwgs-alt-save-btn' ).trigger( 'click' ); return; }
         var $targetWrap = $allWraps.eq( targetIdx );
         var nonce   = $currentWrap.find( '.uwgs-alt-save-btn' ).data( 'nonce' );
-        var postId  = $currentWrap.data( 'post-id' );
+        var postId  = String( $currentWrap.data( 'post-id' ) );
         var altText = $currentWrap.find( '.uwgs-alt-input' ).val().trim();
         var err = validateAltTextInput( altText );
         if ( err ) { $currentWrap.find( '.uwgs-alt-feedback' ).text( err ).addClass( 'error' ); return; }
         $.ajax( {
             url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: postId, alt_text: altText, nonce: nonce },
+            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
             success: function( r ) {
                 if ( r.success ) {
-                    // Use server-confirmed value as truth
-                    var savedAlt = r.data.alt_text || altText;
-                    updateColumnDisplay( $currentWrap, postId, savedAlt, r.data.needs_attention );
+                    updateColumnDisplay( $currentWrap, postId, r.data.alt_text || altText, r.data.needs_attention );
                 }
             },
             complete: function() {
@@ -1201,7 +1204,7 @@ jQuery( function( $ ) {
     $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
         var $btn     = $( this );
         var $wrap    = $btn.closest( '.uwgs-alt-wrap' );
-        var postId   = $wrap.data( 'post-id' );
+        var postId   = String( $wrap.data( 'post-id' ) );
         var nonce    = $btn.data( 'nonce' );
         var altText  = $wrap.find( '.uwgs-alt-input' ).val().trim();
         var $spinner = $wrap.find( '.uwgs-alt-spinner' );
@@ -1216,12 +1219,10 @@ jQuery( function( $ ) {
 
         $.ajax( {
             url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: postId, alt_text: altText, nonce: nonce },
+            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
             success: function( r ) {
                 if ( r.success ) {
-                    // Use server-confirmed value as truth
-                    var savedAlt = r.data.alt_text || altText;
-                    updateColumnDisplay( $wrap, postId, savedAlt, r.data.needs_attention );
+                    updateColumnDisplay( $wrap, postId, r.data.alt_text || altText, r.data.needs_attention );
                     $wrap.find( '.uwgs-alt-editor' ).hide();
                     $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
                     $wrap.find( '.uwgs-alt-display' ).show();
@@ -1229,7 +1230,6 @@ jQuery( function( $ ) {
                     $fb.text( i18n.saved || 'Saved.' ).addClass( 'success' );
                     setTimeout( function() { $fb.text( '' ).removeClass( 'success' ); }, 3000 );
                 } else {
-                    // Save failed — do NOT update currentAlts
                     $fb.text( r.data || i18n.saveFailed ).addClass( 'error' );
                 }
             },
@@ -1241,30 +1241,28 @@ jQuery( function( $ ) {
     // -----------------------------------------------------------------
     // UPDATE COLUMN DISPLAY
     //
-    // Always updates currentAlts from the server-confirmed saved value.
-    // This is the only place currentAlts should be written after page load.
+    // Always updates currentAlts via setCurrentAlt() — string key.
+    // This is the only place currentAlts is written after page load.
     // -----------------------------------------------------------------
 
     function updateColumnDisplay( $wrap, postId, savedAlt, needsAttention ) {
+        var key    = String( postId );
         var $value = $wrap.find( '.uwgs-alt-display.uwgs-alt-value' );
 
         if ( savedAlt.length && ! needsAttention ) {
-            // Good alt text saved
-            currentAlts[ postId ] = savedAlt; // update source of truth
+            setCurrentAlt( key, savedAlt );
             $value.text( savedAlt ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
             $wrap.find( '.uwgs-alt-new-flag' ).remove();
             $wrap.find( '.uwgs-alt-input' ).val( savedAlt );
-            delete classified[ postId ]; delete suggestions[ postId ];
+            delete classified[ key ]; delete suggestions[ key ];
 
         } else if ( savedAlt.length && needsAttention ) {
-            // Saved but low quality
-            currentAlts[ postId ] = savedAlt;
+            setCurrentAlt( key, savedAlt );
             $value.text( '⚠ ' + savedAlt ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
             $wrap.find( '.uwgs-alt-input' ).val( savedAlt );
 
         } else {
-            // Saved as blank (decorative)
-            currentAlts[ postId ] = '';
+            setCurrentAlt( key, '' );
             $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
             $wrap.find( '.uwgs-alt-input' ).val( '' );
         }
@@ -1846,7 +1844,6 @@ JS;
         if ( ! editorSelect ) { return; }
         var isSaving     = editorSelect.isSavingPost();
         var isAutosaving = editorSelect.isAutosavingPost();
-
         if ( isSaving && ! isAutosaving && ! wasSaving ) {
             wasSaving = true;
             if ( checkAltIssues() && ! hasShownAltWarning ) {
@@ -1861,11 +1858,7 @@ JS;
                 }
             }
         }
-
-        if ( ! isSaving && wasSaving ) {
-            wasSaving = false;
-            hasShownAltWarning = false;
-        }
+        if ( ! isSaving && wasSaving ) { wasSaving = false; hasShownAltWarning = false; }
     } );
 
     subscribe( function() {
