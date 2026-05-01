@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.3.5
+ * Version:           2.3.6
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.3.5';
+    const VERSION                = '2.3.6';
     const BULK_CONFIRM_THRESHOLD = 20;
 
     const LOW_QUALITY_WORDS = array(
@@ -673,8 +673,6 @@ class UWGS_Alt_Text_Tool {
 
     private function enqueue_list_view_assets() {
 
-        // FIX v2.3.5: corrected CSS child selectors throughout —
-        // space (descendant) not dot (compound)
         $css = '.uwgs-alt-wrap                      { line-height:1.6; }.uwgs-has-alt                       { color:#2e7d32; }.uwgs-alt-blank                     { color:#c62828; font-weight:600; }.uwgs-low-quality                   { color:#856404; font-weight:600; }.uwgs-alt-new-flag                  {
                 display:inline-block; margin-left:4px; font-size:11px;
                 background:#fff3cd; color:#856404; border:1px solid #ffc107;
@@ -750,9 +748,10 @@ class UWGS_Alt_Text_Tool {
                 'bulkApplyCount'   => __( 'Apply %d high-quality suggestions', 'uwgs-alt-text-tool' ),
                 'bulkApplyNone'    => __( 'No high-quality suggestions available in this view.', 'uwgs-alt-text-tool' ),
                 'bulkConfirm'      => __( 'Apply %d high-quality suggestions to images in this view? This cannot be undone.', 'uwgs-alt-text-tool' ),
-                'bulkSuccess'      => __( 'Applied %d high-quality suggestions.', 'uwgs-alt-text-tool' ),
+                // FIX v2.3.6: updated to say "Applied and saved"
+                'bulkSuccess'      => __( 'Applied and saved %d suggestions.', 'uwgs-alt-text-tool' ),
                 'bulkNeedReview'   => __( '%d image(s) still require manual review.', 'uwgs-alt-text-tool' ),
-                'bulkPartial'      => __( '%d updated, %d failed.', 'uwgs-alt-text-tool' ),
+                'bulkPartial'      => __( '%d saved, %d failed.', 'uwgs-alt-text-tool' ),
                 'bulkFailed'       => __( 'Bulk update failed. Please try again.', 'uwgs-alt-text-tool' ),
                 'bulkRetry'        => __( 'Retry', 'uwgs-alt-text-tool' ),
                 'tooltipGood'      => __( 'High-confidence suggestion — safe to apply', 'uwgs-alt-text-tool' ),
@@ -778,6 +777,10 @@ jQuery( function( $ ) {
 
     var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
 
+    // -----------------------------------------------------------------
+    // CLIENT-SIDE VALIDATION
+    // -----------------------------------------------------------------
+
     function validateAltTextInput( value ) {
         var trimmed = value.trim();
         if ( /^https?:\/\//i.test( trimmed ) || /^www\./i.test( trimmed ) ) {
@@ -788,6 +791,10 @@ jQuery( function( $ ) {
         }
         return null;
     }
+
+    // -----------------------------------------------------------------
+    // FILENAME SANITIZATION
+    // -----------------------------------------------------------------
 
     function sanitizeFilename( raw ) {
         var s = raw;
@@ -803,6 +810,10 @@ jQuery( function( $ ) {
         s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
         return s;
     }
+
+    // -----------------------------------------------------------------
+    // CONFIDENCE CLASSIFICATION
+    // -----------------------------------------------------------------
 
     function classifySuggestion( suggestion ) {
         if ( ! suggestion ) { return 'invalid'; }
@@ -835,12 +846,16 @@ jQuery( function( $ ) {
         return 'good';
     }
 
+    // Pre-classify all suggestions on load
     var classified = {};
     Object.keys( suggestions ).forEach( function( postId ) {
         classified[ postId ] = classifySuggestion( suggestions[ postId ] );
     } );
 
-    // Bulk bar
+    // -----------------------------------------------------------------
+    // BULK APPLY BAR
+    // -----------------------------------------------------------------
+
     var $bulkBar = null, lastFailed = [];
 
     function countRemainingNeedingReview() {
@@ -910,13 +925,22 @@ jQuery( function( $ ) {
                     var c = response.data.counts;
                     lastFailed = response.data.failed || [];
 
+                    // Update UI for each successfully saved item
                     response.data.updated.forEach( function( postId ) {
                         var $wrap = $( '.uwgs-alt-wrap[data-post-id="' + postId + '"]' );
                         var altText = '';
                         updates.forEach( function( u ) { if ( u.id === postId ) { altText = u.alt; } } );
                         if ( altText && $wrap.length ) {
+                            // Update display span
                             $wrap.find( '.uwgs-alt-value' ).text( altText ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
                             $wrap.find( '.uwgs-alt-new-flag' ).remove();
+
+                            // FIX v2.3.6 (Change 1): also update the input field
+                            // so editing after bulk apply shows the saved value,
+                            // not the stale PHP-rendered empty value
+                            $wrap.find( '.uwgs-alt-input' ).val( altText );
+
+                            // Remove from classified/suggestions — item is now saved
                             delete classified[ postId ];
                             delete suggestions[ postId ];
                         }
@@ -925,7 +949,8 @@ jQuery( function( $ ) {
                     var reviewCount = countRemainingNeedingReview();
                     var msg = '';
                     if ( c.updated > 0 ) {
-                        msg = ( i18n.bulkSuccess || 'Applied %d high-quality suggestions.' ).replace( '%d', c.updated );
+                        // FIX v2.3.6 (Change 3): "Applied and saved" not just "Applied"
+                        msg = ( i18n.bulkSuccess || 'Applied and saved %d suggestions.' ).replace( '%d', c.updated );
                     }
                     if ( reviewCount > 0 ) {
                         msg += ( msg ? ' ' : '' ) +
@@ -933,7 +958,7 @@ jQuery( function( $ ) {
                     }
                     if ( c.failed > 0 ) {
                         msg += ( msg ? ' ' : '' ) +
-                            ( i18n.bulkPartial || '%d updated, %d failed.' ).replace( '%d', c.updated ).replace( '%d', c.failed );
+                            ( i18n.bulkPartial || '%d saved, %d failed.' ).replace( '%d', c.updated ).replace( '%d', c.failed );
                     }
 
                     $feedback.text( msg ).addClass( c.failed > 0 ? 'partial' : 'success' );
@@ -963,7 +988,15 @@ jQuery( function( $ ) {
 
     buildBulkBar();
 
-    // Open inline editor
+    // -----------------------------------------------------------------
+    // OPEN INLINE EDITOR
+    //
+    // FIX v2.3.6 (Change 2): when no suggestion exists (e.g. after
+    // bulk apply removed it from suggestions{}), read the current
+    // saved value from the display span and restore it to the input.
+    // This prevents the input showing empty after a bulk apply.
+    // -----------------------------------------------------------------
+
     $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
         var $wrap   = $( this ).closest( '.uwgs-alt-wrap' );
         var postId  = $wrap.data( 'post-id' );
@@ -979,30 +1012,45 @@ jQuery( function( $ ) {
         var $primaryLi = $editor.find( '.uwgs-guidance-primary' );
 
         if ( suggestion ) {
+
             if ( suggestion.type === 'caption' ) {
                 $input.val( suggestion.value );
                 showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
                 $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
+
             } else if ( confidence === 'good' ) {
                 $input.val( sanitizeFilename( suggestion.value ) );
                 showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
                 $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
+
             } else if ( confidence === 'weak' ) {
                 $input.val( sanitizeFilename( suggestion.value ) );
                 showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
                 $primaryLi.text( i18n.guidanceTooShort || 'This may be too brief — consider adding more detail.' );
+
             } else {
                 $input.val( '' );
                 showHint( $input, i18n.invalidSuggest || 'This looks like a filename or URL. Please write a meaningful description.', 'low-quality' );
                 $primaryLi.text( i18n.guidanceFilename || 'This looks like a filename. Describe what the image shows.' );
             }
+
         } else {
+            // No suggestion — item may have been bulk-applied or already had good alt text.
+            // Restore input from the current saved display value if input is stale/empty.
+            var currentSavedVal = $wrap.find( '.uwgs-alt-value.uwgs-has-alt' ).text().trim();
+            if ( $input.val().trim() === '' && currentSavedVal ) {
+                $input.val( currentSavedVal );
+            }
             $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
         }
 
         $input.trigger( 'focus' );
         $( this ).attr( 'aria-expanded', 'true' );
     } );
+
+    // -----------------------------------------------------------------
+    // SHOW HINT with confidence badge
+    // -----------------------------------------------------------------
 
     function showHint( $input, text, type ) {
         $input.closest( '.uwgs-alt-editor' ).find( '.uwgs-alt-suggestion-hint' ).remove();
@@ -1029,7 +1077,10 @@ jQuery( function( $ ) {
         $input.one( 'input', function() { $hint.remove(); } );
     }
 
-    // Cancel
+    // -----------------------------------------------------------------
+    // CANCEL
+    // -----------------------------------------------------------------
+
     $( document ).on( 'click', '.uwgs-alt-cancel-btn', function() {
         var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
         $wrap.find( '.uwgs-alt-editor' ).hide();
@@ -1039,7 +1090,10 @@ jQuery( function( $ ) {
         $wrap.find( '.uwgs-alt-feedback' ).text( '' ).removeClass( 'success error' );
     } );
 
-    // Keyboard
+    // -----------------------------------------------------------------
+    // KEYBOARD
+    // -----------------------------------------------------------------
+
     $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
         var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
         if ( e.which === 13 && ! e.shiftKey && ! e.metaKey && ! e.ctrlKey ) { e.preventDefault(); $wrap.find( '.uwgs-alt-save-btn' ).trigger( 'click' ); return; }
@@ -1074,7 +1128,10 @@ jQuery( function( $ ) {
         } );
     }
 
-    // Save
+    // -----------------------------------------------------------------
+    // SAVE (single item)
+    // -----------------------------------------------------------------
+
     $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
         var $btn     = $( this );
         var $wrap    = $btn.closest( '.uwgs-alt-wrap' );
@@ -1112,17 +1169,25 @@ jQuery( function( $ ) {
         } );
     } );
 
+    // -----------------------------------------------------------------
+    // UPDATE COLUMN DISPLAY
+    // -----------------------------------------------------------------
+
     function updateColumnDisplay( $wrap, altText, needsAttention ) {
-        var postId   = $wrap.data( 'post-id' );
-        var $value   = $wrap.find( '.uwgs-alt-display.uwgs-alt-value' );
+        var postId = $wrap.data( 'post-id' );
+        var $value = $wrap.find( '.uwgs-alt-display.uwgs-alt-value' );
         if ( altText.length && ! needsAttention ) {
             $value.text( altText ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
             $wrap.find( '.uwgs-alt-new-flag' ).remove();
+            // Also keep input in sync with saved value
+            $wrap.find( '.uwgs-alt-input' ).val( altText );
             delete classified[ postId ]; delete suggestions[ postId ];
         } else if ( altText.length && needsAttention ) {
             $value.text( '⚠ ' + altText ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
+            $wrap.find( '.uwgs-alt-input' ).val( altText );
         } else {
             $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
+            $wrap.find( '.uwgs-alt-input' ).val( '' );
         }
     }
 
@@ -1265,7 +1330,6 @@ JS;
 
     private function enqueue_classic_presave_assets() {
 
-        // FIX v2.3.5: corrected CSS child selectors — space (descendant) not dot (compound)
         $css = '
             #uwgs-inline-notice {
                 display:none; margin:8px 0 16px; padding:10px 14px;
@@ -1607,12 +1671,6 @@ JS;
 
     // =========================================================================
     // GUTENBERG: BLOCK CANVAS WARNING + PRE-PUBLISH PANEL + DRAFT SAVE WARNING
-    //
-    // v2.3.5 adds: wp.data.subscribe listener for manual draft saves.
-    // When isSavingPost() === true AND isAutosavingPost() === false,
-    // and alt issues exist, a dismissible WP notice is created.
-    // Uses notice ID 'uwgs-alt-text-draft-warning' to prevent stacking.
-    // Autosaves never trigger the notice.
     // =========================================================================
 
     public function enqueue_block_editor_assets() {
@@ -1626,7 +1684,6 @@ JS;
             'warningBoth'     => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
             'decorativeNote'  => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
             'canvasBanner'    => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
-            // Draft save warning (non-blocking, dismissible WP notice)
             'draftWarning'    => __( 'Some images are missing alt text. You can fix this before publishing.', 'uwgs-alt-text-tool' ),
         );
 
@@ -1639,7 +1696,7 @@ JS;
 
     var el        = wp.element.createElement;
     var Fragment  = wp.element.Fragment;
-    var registerPlugin     = wp.plugins ? wp.plugins.registerPlugin : null;
+    var registerPlugin        = wp.plugins ? wp.plugins.registerPlugin : null;
     var PluginPrePublishPanel = ( wp.editor && wp.editor.PluginPrePublishPanel )
         ? wp.editor.PluginPrePublishPanel
         : ( wp.editPost ? wp.editPost.PluginPrePublishPanel : null );
@@ -1647,10 +1704,6 @@ JS;
     var subscribe = wp.data    ? wp.data.subscribe                     : null;
     var addFilter = wp.hooks   ? wp.hooks.addFilter                    : null;
     var createHOC = wp.compose ? wp.compose.createHigherOrderComponent : null;
-
-    // -----------------------------------------------------------------
-    // BLOCK CANVAS WARNING HOC
-    // -----------------------------------------------------------------
 
     if ( addFilter && createHOC ) {
         var withAltWarning = createHOC( function( BlockEdit ) {
@@ -1680,10 +1733,6 @@ JS;
 
     if ( ! registerPlugin || ! PluginPrePublishPanel || ! useSelect || ! subscribe ) { return; }
 
-    // -----------------------------------------------------------------
-    // SHARED HELPER: check blocks + featured image for alt issues
-    // -----------------------------------------------------------------
-
     function hasImageBlocksMissingAlt( blocks ) {
         if ( ! blocks || ! blocks.length ) { return false; }
         for ( var i = 0; i < blocks.length; i++ ) {
@@ -1702,82 +1751,51 @@ JS;
     function checkAltIssues() {
         var blockEditorStore = wp.data.select( 'core/block-editor' );
         if ( ! blockEditorStore ) { return false; }
-
-        var contentMissing = hasImageBlocksMissingAlt( blockEditorStore.getBlocks() );
-        if ( contentMissing ) { return true; }
-
+        if ( hasImageBlocksMissingAlt( blockEditorStore.getBlocks() ) ) { return true; }
         var featuredId = wp.data.select( 'core/editor' ).getEditedPostAttribute( 'featured_media' );
         if ( featuredId && featuredId > 0 ) {
             var media = wp.data.select( 'core' ).getMedia( featuredId, { context: 'edit' } );
             if ( media && ( media.alt_text || '' ).trim() === '' ) { return true; }
         }
-
         return false;
     }
 
-    // -----------------------------------------------------------------
-    // SUBSCRIBER 1: Draft save warning (NEW in v2.3.5)
-    //
-    // Fires a dismissible WP notice when a manual save occurs and
-    // alt issues exist. Does NOT fire on autosave.
-    //
-    // Logic:
-    // - Track wasSaving to detect the transition: false → true
-    // - Only fire when isSavingPost() && !isAutosavingPost()
-    // - Use notice ID to prevent duplicate stacking
-    // - Reset hasShownAltWarning after save completes so next
-    //   manual save can warn again if issues persist
-    // -----------------------------------------------------------------
-
-    var wasSaving          = false;
-    var hasShownAltWarning = false;
+    // Subscriber 1: Draft save warning
+    var wasSaving = false, hasShownAltWarning = false;
 
     subscribe( function() {
         var editorSelect = wp.data.select( 'core/editor' );
         if ( ! editorSelect ) { return; }
-
         var isSaving     = editorSelect.isSavingPost();
         var isAutosaving = editorSelect.isAutosavingPost();
 
-        // Detect manual save start: transition from not-saving to saving
         if ( isSaving && ! isAutosaving && ! wasSaving ) {
             wasSaving = true;
-
             if ( checkAltIssues() && ! hasShownAltWarning ) {
                 hasShownAltWarning = true;
-
                 var noticesDispatch = wp.data.dispatch( 'core/notices' );
                 if ( noticesDispatch && noticesDispatch.createNotice ) {
                     noticesDispatch.createNotice(
                         'warning',
                         i18n.draftWarning || 'Some images are missing alt text. You can fix this before publishing.',
-                        {
-                            id:            'uwgs-alt-text-draft-warning',
-                            isDismissible: true,
-                        }
+                        { id: 'uwgs-alt-text-draft-warning', isDismissible: true }
                     );
                 }
             }
         }
 
-        // Save completed — reset flags so next manual save can warn again
         if ( ! isSaving && wasSaving ) {
-            wasSaving          = false;
+            wasSaving = false;
             hasShownAltWarning = false;
         }
     } );
 
-    // -----------------------------------------------------------------
-    // SUBSCRIBER 2: Force pre-publish panel open when sidebar opens
-    // (unchanged from v2.3.4)
-    // -----------------------------------------------------------------
-
+    // Subscriber 2: Force pre-publish panel open
     subscribe( function() {
         var editorStore = wp.data.select( 'core/edit-post' ) || wp.data.select( 'core/editor' );
         if ( ! editorStore ) { return; }
         var sidebarOpen = editorStore.isPublishSidebarOpened ? editorStore.isPublishSidebarOpened() : false;
         if ( ! sidebarOpen ) { return; }
-
         if ( checkAltIssues() ) {
             var editPostDispatch = wp.data.dispatch( 'core/edit-post' );
             if ( editPostDispatch && editPostDispatch.toggleEditorPanelOpened ) {
@@ -1787,10 +1805,6 @@ JS;
             }
         }
     } );
-
-    // -----------------------------------------------------------------
-    // PRE-PUBLISH PANEL COMPONENT
-    // -----------------------------------------------------------------
 
     function UWGSAltTextPanel() {
         var contentMissing = useSelect( function( select ) {
@@ -1810,10 +1824,8 @@ JS;
             : i18n.warningContent;
 
         return el( PluginPrePublishPanel, {
-                name:        'uwgs-alt-text-panel',
-                title:       i18n.panelTitle || 'Image Accessibility',
-                initialOpen: hasIssues,
-                className:   hasIssues ? 'uwgs-prepublish-warning' : 'uwgs-prepublish-ok',
+                name:'uwgs-alt-text-panel', title: i18n.panelTitle || 'Image Accessibility',
+                initialOpen: hasIssues, className: hasIssues ? 'uwgs-prepublish-warning' : 'uwgs-prepublish-ok',
             },
             hasIssues
                 ? el( Fragment, null,
