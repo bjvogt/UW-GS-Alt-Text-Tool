@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.3.9
+ * Version:           2.4.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.3.9';
+    const VERSION                = '2.4.0';
     const BULK_CONFIRM_THRESHOLD = 20;
 
     const LOW_QUALITY_WORDS = array(
@@ -278,8 +278,9 @@ class UWGS_Alt_Text_Tool {
     // =========================================================================
     // TOOLBAR FILTER BUTTON
     //
-    // FIX v2.3.9 (Issue 2): moved to right side of toolbar via margin-left:auto
-    // so the stock WP "Filter" button stays near its own date/type dropdowns.
+    // FIX v2.4.0 (Issue 2): Renamed to "Show missing alt text".
+    // Rendered with id="uwgs-alt-filter-btn" so JS can move it to the
+    // bulk actions area after DOM ready.
     // =========================================================================
 
     public function render_filter_button( $post_type ) {
@@ -300,16 +301,14 @@ class UWGS_Alt_Text_Tool {
         $attention_url = add_query_arg( array_merge( $extra, array( 'alt_filter' => 'attention' ) ), $base_url );
         $clear_url     = add_query_arg( array_merge( $extra, array( 'alt_filter' => '' ) ), $base_url );
 
-        // margin-left:auto pushes our button to the right of the toolbar
-        // leaving the stock WP Filter button on the left near its dropdowns
         printf(
-            '<a href="%s" class="button%s" style="margin-left:auto;" aria-pressed="%s">%s</a>',
+            '<a href="%s" id="uwgs-alt-filter-btn" class="button%s" aria-pressed="%s">%s</a>',
             esc_url( $is_active ? $clear_url : $attention_url ),
             $is_active ? ' button-primary' : '',
             $is_active ? 'true' : 'false',
             $is_active
-                ? esc_html__( '✕ Clear Filter', 'uwgs-alt-text-tool' )
-                : esc_html__( '⚠ Alt text issues', 'uwgs-alt-text-tool' )
+                ? esc_html__( '✕ Clear filter', 'uwgs-alt-text-tool' )
+                : esc_html__( 'Show missing alt text', 'uwgs-alt-text-tool' )
         );
     }
 
@@ -691,7 +690,12 @@ class UWGS_Alt_Text_Tool {
                 margin-left:6px; font-size:12px; background:none; border:none; padding:0;
             }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-edit-btn:disabled,.uwgs-alt-edit-btn[aria-disabled="true"] {
                 opacity:0.4; cursor:not-allowed; text-decoration:none;
-            }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }.uwgs-alt-guidance {
+            }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }
+            /* Flash animation for saved confirmation */
+            @keyframes uwgs-saved-flash {
+                0%   { background-color: #d4edda; }
+                100% { background-color: transparent; }
+            }.uwgs-alt-wrap.uwgs-just-saved      { animation: uwgs-saved-flash 1.2s ease-out; }.uwgs-alt-guidance {
                 margin:6px 0 4px; padding:6px 8px;
                 background:#f6f7f7; border-left:3px solid #c3c4c7;
                 border-radius:0 2px 2px 0; font-size:11px;
@@ -712,13 +716,14 @@ class UWGS_Alt_Text_Tool {
             #uwgs-bulk-bar.uwgs-bulk-feedback.success { color:#2e7d32; }
             #uwgs-bulk-bar.uwgs-bulk-feedback.error   { color:#c62828; }
             #uwgs-bulk-bar.uwgs-bulk-feedback.partial { color:#856404; }
+            /* Issue 2: button placement near bulk actions */
+            #uwgs-alt-filter-btn                { margin-left:8px; }
         ';
 
         wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
         wp_enqueue_style( 'uwgs-alt-text-tool' );
         wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        // Build suggestions only — currentAlts is seeded from DOM in JS
         $suggestions = array();
         global $wp_query;
         if ( $wp_query && ! empty( $wp_query->posts ) ) {
@@ -789,30 +794,24 @@ jQuery( function( $ ) {
 
     // -----------------------------------------------------------------
     // SOURCE OF TRUTH: currentAlts
-    //
-    // FIX v2.3.9 (Issue 3): Seeded directly from the DOM using
-    // data-saved-alt attributes on each input — bypasses the PHP→JS
-    // data pipeline that was silently dropping the currentAlts key.
-    // Updated on every successful save (single or bulk).
-    // ALL reads/writes use String(postId) for key consistency.
+    // Seeded from DOM data-saved-alt attributes on page load.
+    // Updated on every successful save via setCurrentAlt().
     // -----------------------------------------------------------------
     var currentAlts = {};
 
-    // Seed from DOM — each input has data-saved-alt="<current db value>"
     $( '.uwgs-alt-input' ).each( function() {
         var postId   = String( $( this ).data( 'post-id' ) );
-        var savedAlt = $( this ).data( 'saved-alt' ) || '';
-        currentAlts[ postId ] = String( savedAlt );
+        var savedAlt = String( $( this ).data( 'saved-alt' ) || '' );
+        currentAlts[ postId ] = savedAlt;
     } );
 
     function getCurrentAlt( postId ) {
         return currentAlts[ String( postId ) ] || '';
     }
     function setCurrentAlt( postId, value ) {
-        currentAlts[ String( postId ) ] = String( value );
-        // Also update the DOM data attribute so it survives re-reads
-        var $input = $( '.uwgs-alt-input[data-post-id="' + postId + '"]' );
-        if ( $input.length ) { $input.attr( 'data-saved-alt', value ); }
+        var key = String( postId );
+        currentAlts[ key ] = String( value );
+        $( '.uwgs-alt-input[data-post-id="' + key + '"]' ).attr( 'data-saved-alt', value );
     }
 
     var isBulkSaving = false;
@@ -880,6 +879,29 @@ jQuery( function( $ ) {
     Object.keys( suggestions ).forEach( function( k ) {
         classified[ String( k ) ] = classifySuggestion( suggestions[ k ] );
     } );
+
+    // -----------------------------------------------------------------
+    // ISSUE 2: Move "Show missing alt text" button to bulk actions area
+    // The button is rendered by PHP inside the filter form; we move it
+    // to after the bulk actions Apply button so it's clearly separate.
+    // -----------------------------------------------------------------
+    ( function repositionFilterBtn() {
+        var $btn = $( '#uwgs-alt-filter-btn' );
+        if ( ! $btn.length ) { return; }
+
+        // Try to place after the bulk actions Apply button
+        var $applyBtn = $( '.tablenav.top.bulkactions input[type="submit"]' );
+        if ( $applyBtn.length ) {
+            $btn.detach().insertAfter( $applyBtn );
+            return;
+        }
+
+        // Fallback: place after the entire bulkactions div
+        var $bulkActions = $( '.tablenav.top.bulkactions' );
+        if ( $bulkActions.length ) {
+            $btn.detach().insertAfter( $bulkActions );
+        }
+    } )();
 
     // -----------------------------------------------------------------
     // BULK APPLY BAR
@@ -974,18 +996,8 @@ jQuery( function( $ ) {
                         var $wrap = $( '.uwgs-alt-wrap[data-post-id="' + key + '"]' );
                         if ( ! $wrap.length ) { return; }
 
-                        // Update source of truth
                         setCurrentAlt( key, savedAlt );
-
-                        // Update display
-                        $wrap.find( '.uwgs-alt-value' ).text( savedAlt ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
-                        $wrap.find( '.uwgs-alt-new-flag' ).remove();
-
-                        // Update input field and data attribute
-                        $wrap.find( '.uwgs-alt-input' ).val( savedAlt ).attr( 'data-saved-alt', savedAlt );
-
-                        delete classified[ key ];
-                        delete suggestions[ key ];
+                        updateColumnDisplay( $wrap, key, savedAlt, false );
                     } );
 
                     var reviewCount = countRemainingNeedingReview();
@@ -1035,8 +1047,6 @@ jQuery( function( $ ) {
 
     // -----------------------------------------------------------------
     // OPEN INLINE EDITOR
-    // Always reads from currentAlts (DOM-seeded source of truth).
-    // Suggestions only shown when currentAlt is empty.
     // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
@@ -1054,15 +1064,11 @@ jQuery( function( $ ) {
         $editor.show();
         $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
 
-        // Always read from currentAlts — source of truth
         var currentVal = getCurrentAlt( postId );
-
-        // Set input from saved value
         $input.val( currentVal );
 
         var $primaryLi = $editor.find( '.uwgs-guidance-primary' );
 
-        // Only show suggestion if there is no saved value
         if ( ! currentVal ) {
             var confidence = classified[ postId ] || null;
             var suggestion = suggestions[ postId ] || null;
@@ -1072,19 +1078,14 @@ jQuery( function( $ ) {
                     $input.val( suggestion.value );
                     showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
                     $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
-
                 } else if ( confidence === 'good' ) {
-                    var sanitized = sanitizeFilename( suggestion.value );
-                    $input.val( sanitized );
+                    $input.val( sanitizeFilename( suggestion.value ) );
                     showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
                     $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
-
                 } else if ( confidence === 'weak' ) {
-                    var sanitizedWeak = sanitizeFilename( suggestion.value );
-                    $input.val( sanitizedWeak );
+                    $input.val( sanitizeFilename( suggestion.value ) );
                     showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
                     $primaryLi.text( i18n.guidanceTooShort || 'This may be too brief — consider adding more detail.' );
-
                 } else {
                     $input.val( '' );
                     showHint( $input, i18n.invalidSuggest || 'This looks like a filename or URL. Please write a meaningful description.', 'low-quality' );
@@ -1187,6 +1188,9 @@ jQuery( function( $ ) {
 
     // -----------------------------------------------------------------
     // SAVE (single item)
+    // FIX v2.4.0 (Issue 1): after successful save, updateColumnDisplay
+    // is called before hiding the editor, then the display is shown.
+    // A brief green flash confirms the save visually.
     // -----------------------------------------------------------------
 
     $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
@@ -1210,11 +1214,21 @@ jQuery( function( $ ) {
             data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
             success: function( r ) {
                 if ( r.success ) {
-                    updateColumnDisplay( $wrap, postId, r.data.alt_text || altText, r.data.needs_attention );
+                    var savedAlt = r.data.alt_text || altText;
+
+                    // Update display BEFORE showing it — no flicker
+                    updateColumnDisplay( $wrap, postId, savedAlt, r.data.needs_attention );
+
+                    // Close editor, show updated display
                     $wrap.find( '.uwgs-alt-editor' ).hide();
                     $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
                     $wrap.find( '.uwgs-alt-display' ).show();
                     $wrap.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
+
+                    // Brief green flash to confirm save
+                    $wrap.addClass( 'uwgs-just-saved' );
+                    setTimeout( function() { $wrap.removeClass( 'uwgs-just-saved' ); }, 1200 );
+
                     $fb.text( i18n.saved || 'Saved.' ).addClass( 'success' );
                     setTimeout( function() { $fb.text( '' ).removeClass( 'success' ); }, 3000 );
                 } else {
@@ -1228,7 +1242,8 @@ jQuery( function( $ ) {
 
     // -----------------------------------------------------------------
     // UPDATE COLUMN DISPLAY
-    // Writes to currentAlts via setCurrentAlt() — keeps DOM in sync.
+    // Single function used by both single-save and bulk-save.
+    // Always updates currentAlts and the DOM display span together.
     // -----------------------------------------------------------------
 
     function updateColumnDisplay( $wrap, postId, savedAlt, needsAttention ) {
@@ -1240,7 +1255,8 @@ jQuery( function( $ ) {
             $value.text( savedAlt ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
             $wrap.find( '.uwgs-alt-new-flag' ).remove();
             $wrap.find( '.uwgs-alt-input' ).val( savedAlt ).attr( 'data-saved-alt', savedAlt );
-            delete classified[ key ]; delete suggestions[ key ];
+            delete classified[ key ];
+            delete suggestions[ key ];
 
         } else if ( savedAlt.length && needsAttention ) {
             setCurrentAlt( key, savedAlt );
@@ -1389,14 +1405,6 @@ JS;
 
     // =========================================================================
     // CLASSIC EDITOR + ALL NON-BLOCK-EDITOR POST TYPES: PRE-SAVE SCAN
-    //
-    // FIX v2.3.9 (Issue 1): "Save anyway" now works correctly for all post
-    // types including uw_stories. Root cause was the capture-phase listener
-    // re-intercepting the programmatic btn.click() triggered by "Save anyway".
-    //
-    // Fix: use a one-time native click (dispatchEvent with a flag) instead of
-    // btn.click() which re-triggers our capture listener. We temporarily
-    // remove and re-add the listener around the programmatic click.
     // =========================================================================
 
     private function enqueue_classic_presave_assets() {
@@ -1461,10 +1469,6 @@ JS;
     var i18n    = data.i18n          || {};
     var warningEl = null, noticeEl = null;
     var noticeDismissed = false;
-
-    // -----------------------------------------------------------------
-    // Save button handlers — stored so we can remove/re-add them
-    // -----------------------------------------------------------------
     var btnHandlers = {};
 
     function contentHasMissingAlt() {
@@ -1562,6 +1566,19 @@ JS;
         document.body.appendChild( warningEl );
     }
 
+    function submitFormDirectly( saveBtn ) {
+        var form = ( saveBtn && saveBtn.closest ) ? saveBtn.closest( 'form' ) : null;
+        if ( ! form ) { form = document.getElementById( 'post' ); }
+        if ( form ) {
+            var hidden = document.createElement( 'input' );
+            hidden.type  = 'hidden';
+            hidden.name  = ( saveBtn && saveBtn.name ) ? saveBtn.name : 'save';
+            hidden.value = ( saveBtn && saveBtn.value ) ? saveBtn.value : 'Save Draft';
+            form.appendChild( hidden );
+            form.submit();
+        }
+    }
+
     function showWarning( hasContent, hasFeatured, saveBtn ) {
         warningEl.innerHTML = '';
         var title = document.createElement( 'strong' );
@@ -1584,29 +1601,7 @@ JS;
         saveAnyway.textContent = i18n.saveAnyway || 'Save anyway';
         saveAnyway.addEventListener( 'click', function() {
             hideWarning();
-            // FIX v2.3.9 (Issue 1): temporarily remove our capture listener,
-            // submit the form directly, then re-add the listener.
-            // This prevents our handler from re-intercepting the programmatic click.
-            if ( saveBtn ) {
-                var id = saveBtn.id;
-                if ( id && btnHandlers[ id ] ) {
-                    saveBtn.removeEventListener( 'click', btnHandlers[ id ], true );
-                }
-                // Submit the form directly — bypasses all click handlers
-                var form = saveBtn.closest( 'form' ) || document.getElementById( 'post' );
-                if ( form ) {
-                    // Set the button name/value so WP knows which action was triggered
-                    var hidden = document.createElement( 'input' );
-                    hidden.type = 'hidden';
-                    hidden.name = saveBtn.name || saveBtn.id || 'save';
-                    hidden.value = saveBtn.value || saveBtn.textContent || 'Save Draft';
-                    form.appendChild( hidden );
-                    form.submit();
-                } else {
-                    // Fallback: native click without our listener
-                    saveBtn.click();
-                }
-            }
+            submitFormDirectly( saveBtn );
         } );
 
         actions.appendChild( goBack ); actions.appendChild( saveAnyway );
@@ -1625,31 +1620,15 @@ JS;
 
             var handler = function( e ) {
                 if ( warningEl.classList.contains( 'visible' ) ) { return; }
-
                 e.preventDefault();
                 e.stopImmediatePropagation();
 
                 var hasContent = contentHasMissingAlt();
                 featuredImageMissingAlt().then( function( hasFeatured ) {
                     if ( hasContent || hasFeatured ) {
-                        // Pass the button reference so "Save anyway" can submit correctly
                         showWarning( hasContent, hasFeatured, btn );
                     } else {
-                        // No issues — submit form directly
-                        var form = btn.closest( 'form' ) || document.getElementById( 'post' );
-                        if ( form ) {
-                            btn.removeEventListener( 'click', handler, true );
-                            var hidden = document.createElement( 'input' );
-                            hidden.type = 'hidden';
-                            hidden.name = btn.name || btn.id || 'save';
-                            hidden.value = btn.value || btn.textContent || 'Save Draft';
-                            form.appendChild( hidden );
-                            form.submit();
-                        } else {
-                            btn.removeEventListener( 'click', handler, true );
-                            btn.click();
-                            btn.addEventListener( 'click', handler, true );
-                        }
+                        submitFormDirectly( btn );
                     }
                 } );
             };
