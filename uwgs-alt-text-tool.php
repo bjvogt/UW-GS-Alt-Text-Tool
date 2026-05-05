@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.4.3
+ * Version:           2.4.4
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.4.3';
+    const VERSION                = '2.4.4';
     const BULK_CONFIRM_THRESHOLD = 20;
 
     const LOW_QUALITY_WORDS = array(
@@ -56,7 +56,6 @@ class UWGS_Alt_Text_Tool {
         add_filter( 'manage_upload_sortable_columns',  array( $this, 'register_sortable' ) );
         add_action( 'pre_get_posts',                   array( $this, 'handle_query' ) );
         add_filter( 'posts_clauses',                   array( $this, 'sort_by_alt_text' ), 10, 2 );
-        // NOTE: render_filter_button removed — button now lives in the blue action bar
         add_action( 'admin_enqueue_scripts',           array( $this, 'enqueue_admin_assets' ) );
         add_action( 'wp_ajax_uwgs_save_alt_text',      array( $this, 'ajax_save_alt_text' ) );
         add_action( 'wp_ajax_uwgs_bulk_save_alt_text', array( $this, 'ajax_bulk_save_alt_text' ) );
@@ -227,7 +226,6 @@ class UWGS_Alt_Text_Tool {
 
     // =========================================================================
     // QUERY: ATTENTION FILTER ONLY
-    // Sorting is now handled entirely by sort_by_alt_text() via posts_clauses.
     // =========================================================================
 
     public function handle_query( $query ) {
@@ -235,7 +233,6 @@ class UWGS_Alt_Text_Tool {
         $screen = get_current_screen();
         if ( ! $screen || 'upload' !== $screen->id ) { return; }
 
-        // Attention filter
         if ( isset( $_GET['alt_filter'] ) && 'attention' === sanitize_key( $_GET['alt_filter'] ) ) {
             $ids = $this->get_attention_ids();
             if ( empty( $ids ) ) {
@@ -249,11 +246,6 @@ class UWGS_Alt_Text_Tool {
 
     // =========================================================================
     // ALT TEXT COLUMN SORTING via posts_clauses
-    //
-    // Uses LEFT JOIN + CASE expression to group empty/NULL values correctly.
-    // ASC:  blanks first → A→Z
-    // DESC: Z→A first → blanks last
-    // GROUP BY prevents duplicate rows from multi-value postmeta edge case.
     // =========================================================================
 
     public function sort_by_alt_text( $clauses, $query ) {
@@ -266,7 +258,6 @@ class UWGS_Alt_Text_Tool {
         $order      = strtoupper( $query->get( 'order' ) ) === 'DESC' ? 'DESC' : 'ASC';
         $join_alias = 'pm_uwgs_alt';
 
-        // Add LEFT JOIN if not already present
         if ( strpos( $clauses['join'], $join_alias ) === false ) {
             $clauses['join'].= $wpdb->prepare(
                 " LEFT JOIN {$wpdb->postmeta} AS {$join_alias}
@@ -276,7 +267,6 @@ class UWGS_Alt_Text_Tool {
             );
         }
 
-        // CASE expression groups empty/NULL explicitly
         if ( $order === 'ASC' ) {
             $clauses['orderby'] = "
                 CASE WHEN {$join_alias}.meta_value IS NULL OR {$join_alias}.meta_value = ''
@@ -291,7 +281,6 @@ class UWGS_Alt_Text_Tool {
             ";
         }
 
-        // Prevent duplicate rows
         $clauses['groupby'] = "{$wpdb->posts}.ID";
         return $clauses;
     }
@@ -578,7 +567,7 @@ class UWGS_Alt_Text_Tool {
                 margin-right:4px; vertical-align:middle; flex-shrink:0;
             }.uwgs-confidence-badge.good    { background:#2e7d32; }.uwgs-confidence-badge.weak    { background:#856404; }.uwgs-confidence-badge.invalid { background:#c62828; }
 
-            /* Action bar — always visible, outside form, below search bar */
+            /* Action bar */
             #uwgs-action-bar {
                 display:flex;
                 flex-direction:column;
@@ -606,7 +595,6 @@ class UWGS_Alt_Text_Tool {
         wp_enqueue_style( 'uwgs-alt-text-tool' );
         wp_add_inline_style( 'uwgs-alt-text-tool', $css );
 
-        // Build suggestions
         $suggestions = array();
         global $wp_query;
         if ( $wp_query && ! empty( $wp_query->posts ) ) {
@@ -626,7 +614,6 @@ class UWGS_Alt_Text_Tool {
             }
         }
 
-        // Build filter URLs preserving passthrough params
         $current       = isset( $_GET['alt_filter'] ) ? sanitize_key( $_GET['alt_filter'] ) : '';
         $is_active     = ( 'attention' === $current );
         $base_url      = admin_url( 'upload.php' );
@@ -666,7 +653,7 @@ class UWGS_Alt_Text_Tool {
                 'bulkApplyCount'   => __( 'Apply %d high-quality suggestions', 'uwgs-alt-text-tool' ),
                 'bulkApplyNone'    => __( 'No high-quality suggestions available in this view.', 'uwgs-alt-text-tool' ),
                 'bulkConfirm'      => __( 'Apply %d high-quality suggestions? This cannot be undone.', 'uwgs-alt-text-tool' ),
-                'bulkSuccess'      => __( 'Applied and saved %d suggestions.', 'uwgs-alt-text-tool' ),
+                'bulkSuccess'      => __( 'Applied and saved %d suggestions. Items remain visible for review.', 'uwgs-alt-text-tool' ),
                 'bulkNeedReview'   => __( '%d image(s) still require manual review.', 'uwgs-alt-text-tool' ),
                 'bulkPartial'      => __( '%d saved, %d failed.', 'uwgs-alt-text-tool' ),
                 'bulkFailed'       => __( 'Bulk update failed. Please try again.', 'uwgs-alt-text-tool' ),
@@ -764,10 +751,9 @@ jQuery( function( $ ) {
     // -----------------------------------------------------------------
     // PERSISTENT ACTION BAR
     //
-    // Inserted AFTER #posts-filter (outside the form) to prevent
-    // any button from triggering form submission.
-    // Always visible. Row 1: buttons. Row 2: feedback text.
-    // Button text: "Show alt text issues" / "✕ Clear filter"
+    // FIX v2.4.4 (Issue 2): Inserted BEFORE.tablenav.top so it appears
+    // above bulk actions. Also intercepts form submit as safety net to
+    // prevent any accidental form submission from the bar's buttons.
     // -----------------------------------------------------------------
 
     var $actionBar = null;
@@ -778,15 +764,12 @@ jQuery( function( $ ) {
     function buildActionBar() {
         $actionBar = $( '<div id="uwgs-action-bar" role="region" aria-label="Alt text tools">' );
 
-        // Row 1: buttons
         var $btnRow = $( '<div class="uwgs-action-bar-buttons">' );
 
-        // Filter link — always present, navigates (not a form submit)
         var $filterLink = $( '<a class="button">' ).attr( 'href', filterUrl ).text( filterLabel );
         if ( isFilterActive ) { $filterLink.addClass( 'button-primary' ); }
         $btnRow.append( $filterLink );
 
-        // Bulk apply — only when filter active
         if ( isFilterActive ) {
             var goodCount = Object.keys( classified ).filter( function( k ) { return classified[ k ] === 'good'; } ).length;
             if ( goodCount > 0 ) {
@@ -803,22 +786,36 @@ jQuery( function( $ ) {
             }
         }
 
-        // Row 2: feedback — separate line below buttons
         var $feedbackRow = $( '<div class="uwgs-action-bar-feedback">' );
         $feedback = $( '<span class="uwgs-bulk-feedback" aria-live="polite"></span>' );
         $feedbackRow.append( $feedback );
 
         $actionBar.append( $btnRow ).append( $feedbackRow );
 
-        // Insert AFTER #posts-filter to stay outside the form
-        var $form = $( '#posts-filter' );
-        if ( $form.length ) {
-            $form.after( $actionBar );
+        // FIX v2.4.4: Insert BEFORE.tablenav.top (above bulk actions)
+        // This keeps the bar visually in the right place while staying
+        // outside the main list table area.
+        var $tablenav = $( '.tablenav.top' );
+        if ( $tablenav.length ) {
+            $tablenav.before( $actionBar );
         } else {
-            var $tablenav = $( '.tablenav.top' );
-            if ( $tablenav.length ) { $tablenav.after( $actionBar ); }
-            else { $( '#wpbody-content' ).prepend( $actionBar ); }
+            $( '#wpbody-content.wrap' ).prepend( $actionBar );
         }
+
+        // FIX v2.4.4: Intercept form submit as safety net.
+        // If anything inside #posts-filter accidentally triggers a submit,
+        // prevent it from reloading the page and losing our applied items.
+        $( '#posts-filter' ).on( 'submit', function( e ) {
+            // Allow the native WP filter form to submit only if it's
+            // the search/filter form being intentionally submitted
+            // (i.e. user clicked the native Filter button).
+            // We detect this by checking if our bulk save is NOT in progress.
+            if ( isBulkSaving ) {
+                e.preventDefault();
+                return false;
+            }
+            // Otherwise allow normal form submission (search, date filter etc.)
+        } );
     }
 
     function setEditButtonsDisabled( disabled ) {
@@ -868,7 +865,8 @@ jQuery( function( $ ) {
                         if ( ! $wrap.length ) { return; }
                         setCurrentAlt( key, savedAlt );
                         updateColumnDisplay( $wrap, key, savedAlt, false );
-                        // Rows stay in DOM for review — do NOT delete classified/suggestions
+                        // FIX v2.4.4 (Issue 1): Do NOT delete classified/suggestions.
+                        // Rows stay in DOM so editor can review and edit applied text.
                     } );
 
                     var reviewCount = countRemainingNeedingReview();
@@ -1017,7 +1015,6 @@ jQuery( function( $ ) {
         } );
     } );
 
-    // FIX v2.4.3: corrected selector — space (descendant) not dot (compound)
     function updateColumnDisplay( $wrap, postId, savedAlt, needsAttention ) {
         var key    = String( postId );
         var $value = $wrap.find( '.uwgs-alt-display.uwgs-alt-value' );
@@ -1092,9 +1089,10 @@ JS;
     // =========================================================================
     // ATTACHMENT EDIT SCREEN ASSETS
     //
-    // v2.4.3: Added suggestion logic — on page load, if alt is empty,
-    // check caption first then filename title, classify, and pre-populate
-    // the field with a hint. Save warning popup unchanged from 2.3.9.
+    // FIX v2.4.4 (Issue 3): Broadened alt field selector to catch all
+    // possible field IDs on the attachment edit screen. Added inline
+    // page notice when alt is blank on load. Save warning popup works
+    // like the classic editor — warns on first click, allows on second.
     // =========================================================================
 
     private function enqueue_attachment_edit_assets( $post_id ) {
@@ -1104,7 +1102,6 @@ JS;
         $filename    = get_post_field( 'post_title', $post_id );
         $should_copy = ( empty( $alt ) && ! empty( $caption ) );
 
-        // Build suggestion for JS
         $suggestion = null;
         if ( empty( $alt ) ) {
             if ( ! empty( trim( $caption ) ) ) {
@@ -1114,8 +1111,15 @@ JS;
             }
         }
 
-        $css = '.uwgs-attachment-alt-warning { display:none; margin-top:6px; padding:8px 10px; background:#fff3cd; border-left:4px solid #ffc107; color:#856404; font-size:13px; border-radius:0 3px 3px 0; }.uwgs-attachment-alt-warning.visible { display:block; }
-            #attachment_alt.uwgs-field-highlight { border-color:#c62828 !important; box-shadow:0 0 0 1px #c62828 !important; }.uwgs-caption-copy-notice { display:flex; align-items:flex-start; gap:8px; margin-top:6px; padding:7px 10px; background:#fff3cd; border-left:4px solid #ffc107; color:#856404; font-size:12px; line-height:1.5; border-radius:0 3px 3px 0; }.uwgs-caption-copy-notice button { background:none; border:none; padding:0; cursor:pointer; color:#856404; font-size:14px; line-height:1; flex-shrink:0; margin-left:auto; }.uwgs-caption-copy-notice button:hover { color:#5a4000; }.uwgs-attach-suggestion-hint { font-size:11px; color:#856404; font-style:italic; margin-top:4px; display:block; }
+        $css = '.uwgs-attachment-alt-warning {
+                display:none; margin-top:6px; padding:8px 10px;
+                background:#fff3cd; border-left:4px solid #ffc107;
+                color:#856404; font-size:13px; border-radius:0 3px 3px 0;
+            }.uwgs-attachment-alt-warning.visible { display:block; }.uwgs-attachment-blank-notice {
+                padding:8px 10px; margin-bottom:8px;
+                background:#fff3cd; border-left:4px solid #ffc107;
+                color:#856404; font-size:13px; border-radius:0 3px 3px 0;
+            }.uwgs-alt-field-highlight { border-color:#c62828 !important; box-shadow:0 0 0 1px #c62828 !important; }.uwgs-caption-copy-notice { display:flex; align-items:flex-start; gap:8px; margin-top:6px; padding:7px 10px; background:#fff3cd; border-left:4px solid #ffc107; color:#856404; font-size:12px; line-height:1.5; border-radius:0 3px 3px 0; }.uwgs-caption-copy-notice button { background:none; border:none; padding:0; cursor:pointer; color:#856404; font-size:14px; line-height:1; flex-shrink:0; margin-left:auto; }.uwgs-caption-copy-notice button:hover { color:#5a4000; }.uwgs-attach-suggestion-hint { font-size:11px; color:#856404; font-style:italic; margin-top:4px; display:block; }
         ';
 
         wp_register_style( 'uwgs-attachment-edit', false, array(), self::VERSION );
@@ -1123,13 +1127,14 @@ JS;
         wp_add_inline_style( 'uwgs-attachment-edit', $css );
 
         $i18n = array(
-            'warningText'      => __( '⚠ This image has no alt text. Alt text is required for accessibility. Please add a description before saving, or confirm this image is decorative by clicking Save again.', 'uwgs-alt-text-tool' ),
-            'captionCopied'    => __( 'Alt text copied from caption — please review and edit if needed before saving.', 'uwgs-alt-text-tool' ),
-            'dismissNotice'    => __( 'Dismiss', 'uwgs-alt-text-tool' ),
-            'fromCaption'      => __( 'Suggested from caption — please review before saving', 'uwgs-alt-text-tool' ),
-            'fromFilename'     => __( 'Suggested from filename — please review before saving', 'uwgs-alt-text-tool' ),
-            'lowConfidence'    => __( 'This may be too brief — consider adding more detail', 'uwgs-alt-text-tool' ),
-            'invalidSuggest'   => __( 'This looks like a filename or URL — please write a meaningful description', 'uwgs-alt-text-tool' ),
+            'warningText'    => __( '⚠ This image has no alt text. Alt text is required for accessibility. Please add a description before saving, or confirm this image is decorative by clicking Update again.', 'uwgs-alt-text-tool' ),
+            'blankNotice'    => __( '⚠ This image has no alt text. Please add a description below.', 'uwgs-alt-text-tool' ),
+            'captionCopied'  => __( 'Alt text copied from caption — please review and edit if needed before saving.', 'uwgs-alt-text-tool' ),
+            'dismissNotice'  => __( 'Dismiss', 'uwgs-alt-text-tool' ),
+            'fromCaption'    => __( 'Suggested from caption — please review before saving', 'uwgs-alt-text-tool' ),
+            'fromFilename'   => __( 'Suggested from filename — please review before saving', 'uwgs-alt-text-tool' ),
+            'lowConfidence'  => __( 'This may be too brief — consider adding more detail', 'uwgs-alt-text-tool' ),
+            'invalidSuggest' => __( 'This looks like a filename or URL — please write a meaningful description', 'uwgs-alt-text-tool' ),
         );
 
         $data = array(
@@ -1137,6 +1142,7 @@ JS;
             'shouldCopy'   => $should_copy,
             'captionValue' => $should_copy ? sanitize_text_field( $caption ) : '',
             'suggestion'   => $suggestion,
+            'altIsBlank'   => empty( $alt ),
         );
 
         wp_add_inline_script( 'jquery', 'var uwgsAttachData = '. wp_json_encode( $data ). ';' );
@@ -1149,11 +1155,33 @@ jQuery( function( $ ) {
     var shouldCopy = data.shouldCopy   || false;
     var capVal     = data.captionValue || '';
     var suggestion = data.suggestion   || null;
-    var $altField  = $( '#attachment_alt' );
-    var $submitBtn = $( '#publish, input[name="save"]' );
+    var altIsBlank = data.altIsBlank   || false;
     var warned     = false;
 
+    // FIX v2.4.4 (Issue 3): Broadened selector — tries multiple possible
+    // field IDs used by WordPress on the attachment edit screen.
+    var $altField = $( '#attachment_alt' ).add( $( 'input[name="attachments[' + $( 'input[name^="post_ID"]' ).val() + '][_wp_attachment_image_alt]"]' ) ).first();
+
+    // Fallback: find any input that looks like the alt text field
+    if ( ! $altField.length ) {
+        $altField = $( 'input[name*="attachment_image_alt"], input[id*="attachment_alt"], textarea[id*="attachment_alt"]' ).first();
+    }
+
+    // Last resort: look for the field near the label "Alternative Text"
+    if ( ! $altField.length ) {
+        $( 'label' ).each( function() {
+            if ( $( this ).text().toLowerCase().indexOf( 'alt' ) !== -1 ) {
+                var $field = $( this ).next( 'input, textarea' );
+                if ( $field.length ) { $altField = $field; return false; }
+                var forId = $( this ).attr( 'for' );
+                if ( forId ) { $altField = $( '#' + forId ); return false; }
+            }
+        } );
+    }
+
     if ( ! $altField.length ) { return; }
+
+    var $submitBtn = $( '#publish, #save-post, input[name="save"], input[type="submit"]' );
 
     var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
 
@@ -1193,18 +1221,22 @@ jQuery( function( $ ) {
         return 'good';
     }
 
+    // Show inline page notice if alt is blank on load
+    if ( altIsBlank ) {
+        var $blankNotice = $( '<div>' ).addClass( 'uwgs-attachment-blank-notice' ).text( i18n.blankNotice || '⚠ This image has no alt text. Please add a description below.' );
+        $altField.before( $blankNotice );
+    }
+
     // Apply suggestion if alt is currently empty
     if ( suggestion && $altField.val().trim() === '' ) {
         var hintText = '';
-        var hintClass = 'uwgs-attach-suggestion-hint';
 
         if ( suggestion.type === 'caption' ) {
             $altField.val( suggestion.value );
             hintText = i18n.fromCaption || 'Suggested from caption — please review before saving';
         } else {
-            var sanitized   = sanitizeFilename( suggestion.value );
-            var confidence  = classifyFilename( suggestion.value );
-
+            var sanitized  = sanitizeFilename( suggestion.value );
+            var confidence = classifyFilename( suggestion.value );
             if ( confidence === 'good' ) {
                 $altField.val( sanitized );
                 hintText = i18n.fromFilename || 'Suggested from filename — please review before saving';
@@ -1212,41 +1244,43 @@ jQuery( function( $ ) {
                 $altField.val( sanitized );
                 hintText = i18n.lowConfidence || 'This may be too brief — consider adding more detail';
             } else {
-                // Invalid — leave empty, show message
                 hintText = i18n.invalidSuggest || 'This looks like a filename or URL — please write a meaningful description';
             }
         }
 
         if ( hintText ) {
-            var $hint = $( '<span>' ).addClass( hintClass ).text( hintText );
+            var $hint = $( '<span>' ).addClass( 'uwgs-attach-suggestion-hint' ).text( hintText );
             $altField.after( $hint );
             $altField.one( 'input', function() { $hint.remove(); } );
         }
     }
 
-    // Caption copy notice (legacy — only fires if shouldCopy is true and
-    // suggestion was not applied above, i.e. alt was already set server-side)
-    if ( shouldCopy && capVal && $altField.val().trim() === capVal ) {
-        var $notice = $( '<div>' ).addClass( 'uwgs-caption-copy-notice' ).attr( { 'role':'note', 'aria-live':'polite' } );
-        var $msg = $( '<span>' ).text( i18n.captionCopied || 'Alt text copied from caption — please review before saving.' );
-        var $dismiss = $( '<button>' ).attr( { 'type':'button', 'aria-label': i18n.dismissNotice || 'Dismiss', 'title': i18n.dismissNotice || 'Dismiss' } ).html( '✕' ).on( 'click', function() { $notice.remove(); } );
-        $notice.append( $msg ).append( $dismiss );
-        $altField.after( $notice );
-        $altField.one( 'input', function() { $notice.remove(); } );
-    }
-
-    // Save warning
-    var $warning = $( '<div>' ).addClass( 'uwgs-attachment-alt-warning' ).attr( { 'role':'alert', 'aria-live':'assertive' } ).text( i18n.warningText || '⚠ This image has no alt text. Please add a description or click Save again to proceed.' );
+    // Save warning — same pattern as classic editor
+    var $warning = $( '<div>' ).addClass( 'uwgs-attachment-alt-warning' ).attr( { 'role': 'alert', 'aria-live': 'assertive' } ).text( i18n.warningText || '⚠ This image has no alt text. Please add a description or click Update again to proceed.' );
     $altField.after( $warning );
 
     $altField.on( 'input', function() {
-        if ( $( this ).val().trim().length ) { $( this ).removeClass( 'uwgs-field-highlight' ); $warning.removeClass( 'visible' ); warned = false; }
+        if ( $( this ).val().trim().length ) {
+            $( this ).removeClass( 'uwgs-alt-field-highlight' );
+            $warning.removeClass( 'visible' );
+            warned = false;
+            // Remove blank notice once editor starts typing
+            $( '.uwgs-attachment-blank-notice' ).remove();
+        }
     } );
 
     $submitBtn.on( 'click', function( e ) {
         if ( $altField.val().trim().length ) { warned = false; return true; }
-        if ( ! warned ) { e.preventDefault(); warned = true; $altField.addClass( 'uwgs-field-highlight' ); $warning.addClass( 'visible' ); $altField.trigger( 'focus' ); return false; }
-        warned = false; return true;
+        if ( ! warned ) {
+            e.preventDefault();
+            warned = true;
+            $altField.addClass( 'uwgs-alt-field-highlight' );
+            $warning.addClass( 'visible' );
+            $altField.trigger( 'focus' );
+            return false;
+        }
+        warned = false;
+        return true;
     } );
 
 } );
