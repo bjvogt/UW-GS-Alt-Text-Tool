@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.4.4
+ * Version:           2.5.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.4.4';
+    const VERSION                = '2.5.0';
     const BULK_CONFIRM_THRESHOLD = 20;
 
     const LOW_QUALITY_WORDS = array(
@@ -129,42 +129,32 @@ class UWGS_Alt_Text_Tool {
 
         ?>
         <div class="uwgs-alt-wrap" data-post-id="<?php echo esc_attr( $post_id ); ?>">
-            <div class="uwgs-alt-display">
-                <?php if ( ! empty( $alt ) && ! $is_low_quality ) : ?>
-                    <span class="uwgs-alt-value uwgs-has-alt"><?php echo esc_html( $alt ); ?></span>
-                <?php elseif ( $is_low_quality ) : ?>
-                    <span class="uwgs-alt-value uwgs-low-quality"
-                          title="<?php esc_attr_e( 'Alt text may not be meaningful — consider improving it', 'uwgs-alt-text-tool' ); ?>">
-                        ⚠ <?php echo esc_html( $alt ); ?>
+
+            <?php /* Status badge — always visible above the input. */ ?>
+            <?php if ( ! empty( $alt ) && ! $is_low_quality ) : ?>
+                <span class="uwgs-alt-value uwgs-has-alt" style="display:block;margin-bottom:4px;"><?php echo esc_html( $alt ); ?></span>
+            <?php elseif ( $is_low_quality ) : ?>
+                <span class="uwgs-alt-value uwgs-low-quality" style="display:block;margin-bottom:4px;"
+                      title="<?php esc_attr_e( 'Alt text may not be meaningful — consider improving it', 'uwgs-alt-text-tool' ); ?>">
+                    ⚠ <?php echo esc_html( $alt ); ?>
+                </span>
+            <?php else : ?>
+                <span class="uwgs-alt-value uwgs-alt-blank" style="display:block;margin-bottom:4px;"
+                      aria-label="<?php esc_attr_e( 'Alt text is blank', 'uwgs-alt-text-tool' ); ?>">
+                    <?php esc_html_e( '(blank)', 'uwgs-alt-text-tool' ); ?>
+                </span>
+                <?php if ( $needs ) : ?>
+                    <span class="uwgs-alt-new-flag"
+                          aria-label="<?php esc_attr_e( 'Uploaded without alt text', 'uwgs-alt-text-tool' ); ?>"
+                          title="<?php esc_attr_e( 'This image was uploaded without alt text', 'uwgs-alt-text-tool' ); ?>">
+                        <?php esc_html_e( 'New', 'uwgs-alt-text-tool' ); ?>
                     </span>
-                <?php else : ?>
-                    <span class="uwgs-alt-value uwgs-alt-blank"
-                          aria-label="<?php esc_attr_e( 'Alt text is blank', 'uwgs-alt-text-tool' ); ?>">
-                        <?php esc_html_e( '(blank)', 'uwgs-alt-text-tool' ); ?>
-                    </span>
-                    <?php if ( $needs ) : ?>
-                        <span class="uwgs-alt-new-flag"
-                              aria-label="<?php esc_attr_e( 'Uploaded without alt text', 'uwgs-alt-text-tool' ); ?>"
-                              title="<?php esc_attr_e( 'This image was uploaded without alt text', 'uwgs-alt-text-tool' ); ?>">
-                            <?php esc_html_e( 'New', 'uwgs-alt-text-tool' ); ?>
-                        </span>
-                    <?php endif; ?>
                 <?php endif; ?>
-                <?php if ( $can_edit ) : ?>
-                    <button type="button"
-                            class="uwgs-alt-edit-btn button-link"
-                            aria-label="<?php echo esc_attr( sprintf( __( 'Edit alt text for attachment %d', 'uwgs-alt-text-tool' ), $post_id ) ); ?>"
-                            aria-expanded="false"
-                            aria-controls="uwgs-alt-editor-<?php echo esc_attr( $post_id ); ?>">
-                        ✎ <?php esc_html_e( 'Edit', 'uwgs-alt-text-tool' ); ?>
-                    </button>
-                <?php endif; ?>
-            </div>
+            <?php endif; ?>
 
             <?php if ( $can_edit ) : ?>
             <div class="uwgs-alt-editor"
                  id="uwgs-alt-editor-<?php echo esc_attr( $post_id ); ?>"
-                 style="display:none;margin-top:6px;"
                  role="group"
                  aria-label="<?php esc_attr_e( 'Alt text editor', 'uwgs-alt-text-tool' ); ?>">
                 <label for="uwgs-alt-input-<?php echo esc_attr( $post_id ); ?>"
@@ -180,30 +170,11 @@ class UWGS_Alt_Text_Tool {
                        data-post-id="<?php echo esc_attr( $post_id ); ?>"
                        data-saved-alt="<?php echo esc_attr( $alt ); ?>"
                 />
-                <div class="uwgs-alt-guidance" role="note"
-                     aria-label="<?php esc_attr_e( 'Alt text guidance', 'uwgs-alt-text-tool' ); ?>">
-                    <ul>
-                        <li class="uwgs-guidance-primary">
-                            <?php esc_html_e( 'Describe the purpose of the image, not just what it is.', 'uwgs-alt-text-tool' ); ?>
-                        </li>
-                        <li><?php esc_html_e( 'Avoid phrases like "image of" or "photo of".', 'uwgs-alt-text-tool' ); ?></li>
-                        <li><?php esc_html_e( 'Avoid generic labels like "image" or "photo".', 'uwgs-alt-text-tool' ); ?></li>
-                        <li>
-                            <?php esc_html_e( 'Leave blank only if purely decorative', 'uwgs-alt-text-tool' ); ?>
-                            <em><?php esc_html_e( '(e.g., visual styling with no informational value).', 'uwgs-alt-text-tool' ); ?></em>
-                        </li>
-                    </ul>
-                </div>
                 <div style="margin-top:4px;">
                     <button type="button"
                             class="uwgs-alt-save-btn button button-primary button-small"
                             data-nonce="<?php echo esc_attr( $nonce ); ?>">
                         <?php esc_html_e( 'Save', 'uwgs-alt-text-tool' ); ?>
-                    </button>
-                    <button type="button"
-                            class="uwgs-alt-cancel-btn button button-small"
-                            style="margin-left:4px;">
-                        <?php esc_html_e( 'Cancel', 'uwgs-alt-text-tool' ); ?>
                     </button>
                     <span class="uwgs-alt-spinner spinner"
                           style="float:none;margin:0 4px;vertical-align:middle;"
@@ -555,14 +526,7 @@ class UWGS_Alt_Text_Tool {
                 display:inline-block; margin-left:4px; font-size:11px;
                 background:#fff3cd; color:#856404; border:1px solid #ffc107;
                 border-radius:3px; padding:1px 5px; vertical-align:middle;
-            }.uwgs-alt-edit-btn                  {
-                cursor:pointer; text-decoration:underline; color:#2271b1;
-                margin-left:6px; font-size:12px; background:none; border:none; padding:0;
-            }.uwgs-alt-edit-btn:hover            { color:#135e96; }.uwgs-alt-edit-btn:disabled,.uwgs-alt-edit-btn[aria-disabled="true"] { opacity:0.4; cursor:not-allowed; text-decoration:none; }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }.uwgs-alt-guidance {
-                margin:6px 0 4px; padding:6px 8px;
-                background:#f6f7f7; border-left:3px solid #c3c4c7;
-                border-radius:0 2px 2px 0; font-size:11px; color:#646970; line-height:1.5;
-            }.uwgs-alt-guidance ul               { margin:0; padding:0 0 0 14px; list-style:disc; }.uwgs-alt-guidance ul li            { margin:0; padding:0; }.uwgs-alt-guidance.uwgs-guidance-primary { font-weight:600; color:#1d2327; }.uwgs-confidence-badge {
+            }.uwgs-alt-feedback.success          { color:#2e7d32; }.uwgs-alt-feedback.error            { color:#c62828; }.uwgs-alt-editor input[type="text"] { font-size:13px; }.uwgs-confidence-badge {
                 display:inline-block; width:8px; height:8px; border-radius:50%;
                 margin-right:4px; vertical-align:middle; flex-shrink:0;
             }.uwgs-confidence-badge.good    { background:#2e7d32; }.uwgs-confidence-badge.weak    { background:#856404; }.uwgs-confidence-badge.invalid { background:#c62828; }
@@ -695,7 +659,6 @@ jQuery( function( $ ) {
         $( '.uwgs-alt-input[data-post-id="' + key + '"]' ).attr( 'data-saved-alt', value );
     }
 
-    var isBulkSaving = false;
     var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
 
     function validateAltTextInput( value ) {
@@ -759,7 +722,6 @@ jQuery( function( $ ) {
     var $actionBar = null;
     var $applyBtn  = null;
     var $feedback  = null;
-    var lastFailed = [];
 
     function buildActionBar() {
         $actionBar = $( '<div id="uwgs-action-bar" role="region" aria-label="Alt text tools">' );
@@ -773,10 +735,9 @@ jQuery( function( $ ) {
         if ( isFilterActive ) {
             var goodCount = Object.keys( classified ).filter( function( k ) { return classified[ k ] === 'good'; } ).length;
             if ( goodCount > 0 ) {
-                $applyBtn = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button button-secondary button-small' ).text( ( i18n.bulkApplyCount || 'Apply %d high-quality suggestions' ).replace( '%d', goodCount ) );
+                $applyBtn = $( '<button>' ).attr( 'type', 'button' ).addClass( 'button button-secondary button-small' ).text( ( i18n.bulkApplyCount || 'Apply %d suggestions to inputs' ).replace( '%d', goodCount ) );
                 $applyBtn.on( 'click', function( e ) {
                     e.preventDefault(); e.stopPropagation();
-                    if ( isBulkSaving ) { return false; }
                     handleBulkApply( goodCount );
                     return false;
                 } );
@@ -792,151 +753,42 @@ jQuery( function( $ ) {
 
         $actionBar.append( $btnRow ).append( $feedbackRow );
 
-        // FIX v2.4.4: Insert BEFORE.tablenav.top (above bulk actions)
-        // This keeps the bar visually in the right place while staying
-        // outside the main list table area.
         var $tablenav = $( '.tablenav.top' );
         if ( $tablenav.length ) {
             $tablenav.before( $actionBar );
         } else {
             $( '#wpbody-content.wrap' ).prepend( $actionBar );
         }
-
-        // FIX v2.4.4: Intercept form submit as safety net.
-        // If anything inside #posts-filter accidentally triggers a submit,
-        // prevent it from reloading the page and losing our applied items.
-        $( '#posts-filter' ).on( 'submit', function( e ) {
-            // Allow the native WP filter form to submit only if it's
-            // the search/filter form being intentionally submitted
-            // (i.e. user clicked the native Filter button).
-            // We detect this by checking if our bulk save is NOT in progress.
-            if ( isBulkSaving ) {
-                e.preventDefault();
-                return false;
-            }
-            // Otherwise allow normal form submission (search, date filter etc.)
-        } );
-    }
-
-    function setEditButtonsDisabled( disabled ) {
-        $( '.uwgs-alt-edit-btn' ).prop( 'disabled', disabled ).attr( 'aria-disabled', disabled ? 'true' : 'false' );
-    }
-
-    function countRemainingNeedingReview() {
-        return Object.keys( classified ).filter( function( k ) { return classified[ k ] === 'weak' || classified[ k ] === 'invalid'; } ).length;
     }
 
     function handleBulkApply( count ) {
-        if ( isBulkSaving ) { return; }
-        if ( count >= bulkThreshold ) {
-            if ( ! window.confirm( ( i18n.bulkConfirm || 'Apply %d suggestions? This cannot be undone.' ).replace( '%d', count ) ) ) { return; }
-        }
-
-        var updates = [];
+        // Populate inputs only — do NOT save to database.
+        // Editors review and save each row individually.
+        var populated = 0;
         Object.keys( classified ).forEach( function( k ) {
             if ( classified[ k ] !== 'good' ) { return; }
             var suggestion = suggestions[ k ];
             if ( ! suggestion ) { return; }
             var altText = suggestion.type === 'caption' ? suggestion.value : sanitizeFilename( suggestion.value );
-            if ( validateAltTextInput( altText ) ) { return; }
-            if ( altText ) { updates.push( { id: parseInt( k, 10 ), alt: altText } ); }
+            if ( validateAltTextInput( altText ) || ! altText ) { return; }
+            var $wrap = $( '.uwgs-alt-wrap[data-post-id="' + k + '"]' );
+            if ( ! $wrap.length ) { return; }
+            var $input = $wrap.find( '.uwgs-alt-input' );
+            $input.val( altText );
+            // Show a hint so editors know this was populated by suggestion
+            showHint( $input, suggestion.type === 'caption' ? ( i18n.fromCaption || 'Suggested from caption — please review' ) : ( i18n.fromFilename || 'Suggested from filename — please review' ), suggestion.type === 'caption' ? 'caption' : 'filename' );
+            populated++;
         } );
-        if ( ! updates.length ) { return; }
-
-        isBulkSaving = true;
-        if ( $applyBtn ) { $applyBtn.prop( 'disabled', true ).text( '…' ); }
-        if ( $feedback ) { $feedback.text( '' ).removeClass( 'success error partial' ); }
-        setEditButtonsDisabled( true );
-
-        $.ajax( {
-            url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_bulk_save_alt_text', nonce: bulkNonce, updates: updates },
-            success: function( response ) {
-                if ( response.success ) {
-                    var c = response.data.counts;
-                    var savedValues = response.data.saved_values || {};
-                    lastFailed = response.data.failed || [];
-
-                    response.data.updated.forEach( function( postId ) {
-                        var key      = String( postId );
-                        var savedAlt = savedValues[ key ] || '';
-                        if ( ! savedAlt ) { return; }
-                        var $wrap = $( '.uwgs-alt-wrap[data-post-id="' + key + '"]' );
-                        if ( ! $wrap.length ) { return; }
-                        setCurrentAlt( key, savedAlt );
-                        updateColumnDisplay( $wrap, key, savedAlt, false );
-                        // FIX v2.4.4 (Issue 1): Do NOT delete classified/suggestions.
-                        // Rows stay in DOM so editor can review and edit applied text.
-                    } );
-
-                    var reviewCount = countRemainingNeedingReview();
-                    var msg = '';
-                    if ( c.updated > 0 ) { msg = ( i18n.bulkSuccess || 'Applied and saved %d suggestions.' ).replace( '%d', c.updated ); }
-                    if ( reviewCount > 0 ) { msg += ( msg ? ' ' : '' ) + ( i18n.bulkNeedReview || '%d image(s) still require manual review.' ).replace( '%d', reviewCount ); }
-                    if ( c.failed > 0 ) { msg += ( msg ? ' ' : '' ) + ( i18n.bulkPartial || '%d saved, %d failed.' ).replace( '%d', c.updated ).replace( '%d', c.failed ); }
-
-                    if ( $feedback ) { $feedback.text( msg ).addClass( c.failed > 0 ? 'partial' : 'success' ); }
-
-                    if ( lastFailed.length && $feedback ) {
-                        var $retry = $( '<button type="button" class="button button-small" style="margin-left:8px;">' ).text( i18n.bulkRetry || 'Retry' ).on( 'click', function( e ) { e.preventDefault(); e.stopPropagation(); $( this ).remove(); handleBulkApply( lastFailed.length ); return false; } );
-                        $feedback.after( $retry );
-                    }
-
-                    var remaining = Object.keys( classified ).filter( function( k ) { return classified[ k ] === 'good'; } ).length;
-                    if ( $applyBtn ) {
-                        if ( remaining > 0 ) { $applyBtn.prop( 'disabled', false ).text( ( i18n.bulkApplyCount || 'Apply %d high-quality suggestions' ).replace( '%d', remaining ) ); }
-                        else { $applyBtn.prop( 'disabled', true ).text( i18n.bulkApplyLabel || 'Apply good suggestions' ); }
-                    }
-                } else {
-                    if ( $feedback ) { $feedback.text( i18n.bulkFailed || 'Bulk update failed.' ).addClass( 'error' ); }
-                    if ( $applyBtn ) { $applyBtn.prop( 'disabled', false ); }
-                }
-            },
-            error: function() {
-                if ( $feedback ) { $feedback.text( i18n.bulkFailed || 'Bulk update failed.' ).addClass( 'error' ); }
-                if ( $applyBtn ) { $applyBtn.prop( 'disabled', false ); }
-            },
-            complete: function() { isBulkSaving = false; setEditButtonsDisabled( false ); }
-        } );
+        if ( $applyBtn ) { $applyBtn.prop( 'disabled', true ); }
+        if ( $feedback ) {
+            var msg = populated > 0
+                ? ( i18n.bulkApplyCount || 'Apply %d high-quality suggestions' ).replace( '%d', populated ) + ' — review each row and click Save.'
+                : ( i18n.bulkApplyNone || 'No high-quality suggestions available.' );
+            $feedback.text( msg ).addClass( populated > 0 ? 'success' : '' );
+        }
     }
 
     buildActionBar();
-
-    // Open inline editor
-    $( document ).on( 'click', '.uwgs-alt-edit-btn', function() {
-        if ( isBulkSaving ) { alert( i18n.savingInProgress || 'Saving in progress — please wait.' ); return; }
-        var $wrap   = $( this ).closest( '.uwgs-alt-wrap' );
-        var postId  = String( $wrap.data( 'post-id' ) );
-        var $editor = $wrap.find( '.uwgs-alt-editor' );
-        var $input  = $editor.find( '.uwgs-alt-input' );
-        $wrap.find( '.uwgs-alt-display' ).hide();
-        $editor.show();
-        $editor.find( '.uwgs-alt-suggestion-hint' ).remove();
-        var currentVal = getCurrentAlt( postId );
-        $input.val( currentVal );
-        var $primaryLi = $editor.find( '.uwgs-guidance-primary' );
-        if ( ! currentVal ) {
-            var confidence = classified[ postId ] || null;
-            var suggestion = suggestions[ postId ] || null;
-            if ( suggestion ) {
-                if ( suggestion.type === 'caption' ) {
-                    $input.val( suggestion.value ); showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
-                    $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
-                } else if ( confidence === 'good' ) {
-                    $input.val( sanitizeFilename( suggestion.value ) ); showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
-                    $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' );
-                } else if ( confidence === 'weak' ) {
-                    $input.val( sanitizeFilename( suggestion.value ) ); showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
-                    $primaryLi.text( i18n.guidanceTooShort || 'This may be too brief — consider adding more detail.' );
-                } else {
-                    $input.val( '' ); showHint( $input, i18n.invalidSuggest || 'This looks like a filename or URL. Please write a meaningful description.', 'low-quality' );
-                    $primaryLi.text( i18n.guidanceFilename || 'This looks like a filename. Describe what the image shows.' );
-                }
-            } else { $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' ); }
-        } else { $primaryLi.text( i18n.guidanceDefault || 'Describe the purpose of the image, not just what it is.' ); }
-        $input.trigger( 'focus' );
-        $( this ).attr( 'aria-expanded', 'true' );
-    } );
 
     function showHint( $input, text, type ) {
         $input.closest( '.uwgs-alt-editor' ).find( '.uwgs-alt-suggestion-hint' ).remove();
@@ -945,22 +797,33 @@ jQuery( function( $ ) {
         var textStyles  = { 'caption': { color:'#856404', fontStyle:'italic', fontWeight:'normal' }, 'filename': { color:'#856404', fontStyle:'italic', fontWeight:'normal' }, 'low-confidence': { color:'#555', fontStyle:'italic', fontWeight:'normal' }, 'low-quality': { color:'#555', fontStyle:'normal', fontWeight:'600' } };
         var $badge = $( '<span>' ).addClass( 'uwgs-confidence-badge ' + badgeClass ).attr( 'title', tooltipText ).attr( 'aria-label', tooltipText );
         var $hint = $( '<p>' ).addClass( 'uwgs-alt-suggestion-hint' ).css( $.extend( { 'margin':'4px 0 0', 'font-size':'11px', 'display':'flex', 'align-items':'center' }, textStyles[ type ] || textStyles['filename'] ) ).append( $badge ).append( document.createTextNode( text ) );
-        var $guidance = $input.closest( '.uwgs-alt-editor' ).find( '.uwgs-alt-guidance' );
-        if ( $guidance.length ) { $guidance.before( $hint ); } else { $input.after( $hint ); }
+        $input.after( $hint );
         $input.one( 'input', function() { $hint.remove(); } );
     }
 
-    $( document ).on( 'click', '.uwgs-alt-cancel-btn', function() {
-        var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
-        $wrap.find( '.uwgs-alt-editor' ).hide(); $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
-        $wrap.find( '.uwgs-alt-display' ).show(); $wrap.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
-        $wrap.find( '.uwgs-alt-feedback' ).text( '' ).removeClass( 'success error' );
+    // Seed suggestion hints on page load for inputs that are still blank
+    $( '.uwgs-alt-input' ).each( function() {
+        var $input  = $( this );
+        var postId  = String( $input.data( 'post-id' ) );
+        var savedAlt = String( $input.data( 'saved-alt' ) || '' );
+        if ( savedAlt !== '' ) { return; } // already has alt text — no hint needed
+        var suggestion  = suggestions[ postId ] || null;
+        var confidence  = classified[ postId ]  || null;
+        if ( ! suggestion ) { return; }
+        if ( suggestion.type === 'caption' ) {
+            showHint( $input, i18n.fromCaption || 'Suggested from caption — please review', 'caption' );
+        } else if ( confidence === 'good' ) {
+            showHint( $input, i18n.fromFilename || 'Suggested from filename — please review', 'filename' );
+        } else if ( confidence === 'weak' ) {
+            showHint( $input, i18n.lowConfidence || 'Consider adding more detail for better accessibility', 'low-confidence' );
+        } else {
+            showHint( $input, i18n.invalidSuggest || 'This looks like a filename or URL. Please write a meaningful description.', 'low-quality' );
+        }
     } );
 
     $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
         var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
         if ( e.which === 13 && ! e.shiftKey && ! e.metaKey && ! e.ctrlKey ) { e.preventDefault(); $wrap.find( '.uwgs-alt-save-btn' ).trigger( 'click' ); return; }
-        if ( e.which === 27 ) { $wrap.find( '.uwgs-alt-cancel-btn' ).trigger( 'click' ); return; }
         if ( e.which === 13 && ( e.metaKey || e.ctrlKey ) ) { e.preventDefault(); saveAndAdvance( $wrap, 1 ); return; }
         if ( e.which === 9 && ! e.shiftKey ) { e.preventDefault(); saveAndAdvance( $wrap, 1 ); return; }
         if ( e.which === 9 && e.shiftKey ) { e.preventDefault(); saveAndAdvance( $wrap, -1 ); return; }
@@ -970,8 +833,6 @@ jQuery( function( $ ) {
         var $allWraps = $( '.uwgs-alt-wrap' );
         var idx = $allWraps.index( $currentWrap );
         var targetIdx = idx + direction;
-        if ( targetIdx < 0 || targetIdx >= $allWraps.length ) { $currentWrap.find( '.uwgs-alt-save-btn' ).trigger( 'click' ); return; }
-        var $targetWrap = $allWraps.eq( targetIdx );
         var nonce = $currentWrap.find( '.uwgs-alt-save-btn' ).data( 'nonce' );
         var postId = String( $currentWrap.data( 'post-id' ) );
         var altText = $currentWrap.find( '.uwgs-alt-input' ).val().trim();
@@ -982,9 +843,9 @@ jQuery( function( $ ) {
             data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
             success: function( r ) { if ( r.success ) { updateColumnDisplay( $currentWrap, postId, r.data.alt_text || altText, r.data.needs_attention ); } },
             complete: function() {
-                $currentWrap.find( '.uwgs-alt-editor' ).hide(); $currentWrap.find( '.uwgs-alt-suggestion-hint' ).remove();
-                $currentWrap.find( '.uwgs-alt-display' ).show(); $currentWrap.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' );
-                $targetWrap.find( '.uwgs-alt-edit-btn' ).trigger( 'click' );
+                if ( targetIdx >= 0 && targetIdx < $allWraps.length ) {
+                    $allWraps.eq( targetIdx ).find( '.uwgs-alt-input' ).trigger( 'focus' );
+                }
             }
         } );
     }
@@ -1004,8 +865,6 @@ jQuery( function( $ ) {
             success: function( r ) {
                 if ( r.success ) {
                     updateColumnDisplay( $wrap, postId, r.data.alt_text || altText, r.data.needs_attention );
-                    $wrap.find( '.uwgs-alt-editor' ).hide(); $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
-                    $wrap.find( '.uwgs-alt-display' ).show(); $wrap.find( '.uwgs-alt-edit-btn' ).attr( 'aria-expanded', 'false' ).trigger( 'focus' );
                     $fb.text( i18n.saved || 'Saved.' ).addClass( 'success' );
                     setTimeout( function() { $fb.text( '' ).removeClass( 'success' ); }, 3000 );
                 } else { $fb.text( r.data || i18n.saveFailed ).addClass( 'error' ); }
@@ -1016,22 +875,20 @@ jQuery( function( $ ) {
     } );
 
     function updateColumnDisplay( $wrap, postId, savedAlt, needsAttention ) {
-        var key    = String( postId );
-        var $value = $wrap.find( '.uwgs-alt-display.uwgs-alt-value' );
+        var key = String( postId );
+        setCurrentAlt( key, savedAlt );
+        $wrap.find( '.uwgs-alt-input' ).val( savedAlt ).attr( 'data-saved-alt', savedAlt );
+        $wrap.find( '.uwgs-alt-suggestion-hint' ).remove();
+        // Update the status badge
+        var $badge = $wrap.find( '.uwgs-alt-value' );
         if ( savedAlt.length && ! needsAttention ) {
-            setCurrentAlt( key, savedAlt );
-            $value.text( savedAlt ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).css( 'font-weight', 'normal' ).removeAttr( 'aria-label' );
+            $badge.text( savedAlt ).removeClass( 'uwgs-alt-blank uwgs-low-quality' ).addClass( 'uwgs-has-alt' ).removeAttr( 'aria-label' );
             $wrap.find( '.uwgs-alt-new-flag' ).remove();
-            $wrap.find( '.uwgs-alt-input' ).val( savedAlt ).attr( 'data-saved-alt', savedAlt );
             delete classified[ key ]; delete suggestions[ key ];
         } else if ( savedAlt.length && needsAttention ) {
-            setCurrentAlt( key, savedAlt );
-            $value.text( '⚠ ' + savedAlt ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
-            $wrap.find( '.uwgs-alt-input' ).val( savedAlt ).attr( 'data-saved-alt', savedAlt );
+            $badge.text( '⚠ ' + savedAlt ).removeClass( 'uwgs-alt-blank uwgs-has-alt' ).addClass( 'uwgs-low-quality' );
         } else {
-            setCurrentAlt( key, '' );
-            $value.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
-            $wrap.find( '.uwgs-alt-input' ).val( '' ).attr( 'data-saved-alt', '' );
+            $badge.text( i18n.blank || '(blank)' ).removeClass( 'uwgs-has-alt uwgs-low-quality' ).addClass( 'uwgs-alt-blank' ).attr( 'aria-label', 'Alt text is blank' );
         }
     }
 
