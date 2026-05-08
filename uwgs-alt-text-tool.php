@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.2
+ * Version:           2.5.3
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.2';
+    const VERSION                = '2.5.3';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -524,7 +524,12 @@ class UWGS_Alt_Text_Tool {
             if ( $post && 'post.php' === $hook && 'attachment' === get_post_type( $post->ID ) && strpos( get_post_mime_type( $post->ID ), 'image/' ) === 0 ) {
                 $this->enqueue_attachment_edit_assets( $post->ID );
             }
-            if ( ! did_action( 'enqueue_block_editor_assets' ) ) { $this->enqueue_classic_presave_assets(); }
+            if ( ! did_action( 'enqueue_block_editor_assets' ) ) {
+                $post_type = ( $post ) ? get_post_type( $post->ID ) : '';
+                if ( 'uw_stories' !== $post_type ) {
+                    $this->enqueue_classic_presave_assets();
+                }
+            }
             if ( ! did_action( 'wp_enqueue_media' ) ) { wp_enqueue_media(); }
             $this->enqueue_media_modal_caption_assets();
         }
@@ -1302,6 +1307,12 @@ JS;
             hidden.value = submitter.value || '';
             form.appendChild( hidden );
         }
+        // Sync TinyMCE editors to their textareas before native submission,
+        // because form.submit() does not fire the submit event that WordPress
+        // normally uses to trigger tinyMCE.triggerSave().
+        if ( typeof window.tinyMCE !== 'undefined' ) {
+            try { tinyMCE.triggerSave(); } catch ( err ) {}
+        }
         form.submit();
     }
 
@@ -1853,6 +1864,12 @@ JS;
             hidden.name = submitter.name;
             hidden.value = submitter.value || '';
             form.appendChild( hidden );
+        }
+        // Sync TinyMCE editors to their textareas before native submission,
+        // because form.submit() does not fire the submit event that WordPress
+        // normally uses to trigger tinyMCE.triggerSave().
+        if ( typeof window.tinyMCE !== 'undefined' ) {
+            try { tinyMCE.triggerSave(); } catch ( err ) {}
         }
         form.submit(); // does not fire the submit event — bypasses all listeners
     }
