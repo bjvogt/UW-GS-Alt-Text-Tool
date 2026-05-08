@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.3
+ * Version:           2.5.4
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.3';
+    const VERSION                = '2.5.4';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -1748,36 +1748,41 @@ JS;
     'use strict';
 
     // =========================================================================
-    // SAVE-FLOW ARCHITECTURE (uw_stories — ACF + TinyMCE) — v2.5.3
+    // SAVE-FLOW ARCHITECTURE (uw_stories — ACF + TinyMCE) — v2.5.4
     // =========================================================================
-    // ACF Pro intercepts submit-button CLICK events (jQuery, bubble phase) and
-    // then calls form.submit() natively after its own validation passes.
-    // Native form.submit() does NOT dispatch a submit event, so a listener on
-    // the submit event never fires for uw_stories — that was the bug in v2.5.2.
+    // ACF's validation fires on the form SUBMIT event (not the click):
+    //   1. User clicks #publish
+    //   2. ACF's onClickSubmit (jQuery, document bubble) just stores the event
+    //   3. Browser default click action fires the form submit event
+    //   4. ACF's onSubmit (jQuery, document bubble) runs async validation
+    //      — it prevents the submit, validates, then on success calls
+    //      jQuery $(form).submit() which fires a 2nd submit event
+    //   5. On the 2nd submit ACF sees validation already passed → allows it
+    //   6. Browser default of the 2nd submit → form POSTs to server
     //
-    // The fix: intercept the CLICK event in capture phase (before ACF's jQuery
-    // bubble-phase handler). This gives us first access to the save action.
+    // Complications:
+    //   a. WP publish/update buttons use form="post" attribute and may sit
+    //      OUTSIDE the <form id="post"> element in the DOM, so a listener
+    //      on the form never receives their clicks.
+    //   b. ACF's onSubmit checks e.isDefaultPrevented(): if we prevented a
+    //      submit event, ACF just calls allowSubmit() (no-op) and does nothing —
+    //      the form never sends. So intercepting the submit event breaks saves.
     //
-    //   1. A single delegated `click` listener on form#post in capture phase
-    //      filters for submit-type buttons (#publish, #save-post, type=submit).
-    //      It runs before ACF's jQuery click handler and before any native
-    //      form submission.
+    // Fix: intercept CLICK events at the DOCUMENT level in capture phase —
+    // document is always an ancestor of every button regardless of DOM position.
     //
-    //   2. When alt issues are detected we preventDefault() + stopImmediatePropagation()
-    //      so neither the native click action nor ACF's handler fires. We show
-    //      our warning; the user either fixes and re-clicks, or clicks "Save anyway".
+    //   1. Document capture listener filters for submit-type buttons that target
+    //      form#post (via btn.form or the form="post" attribute).
     //
-    //   3. "Save anyway" calls form.submit() natively — bypasses ACF's JS
-    //      validation and our listener alike. The form data (including ACF hidden
-    //      inputs) is already in the DOM. tinyMCE.triggerSave() is called first
-    //      to flush any TinyMCE WYSIWYG content to its textarea.
+    //   2. We stop the click, run our async alt-text scan, then:
+    //      — Issues found → show warning panel.
+    //      — Clean scan   → set a one-shot bypass, call btn.click().
+    //        The bypass is consumed immediately on the re-click so the next
+    //        user save attempt always re-scans.
     //
-    //   4. For a clean scan (no issues), bypassValidation is set and btn.click()
-    //      is called programmatically. Our capture handler sees the flag and
-    //      returns immediately, so ACF's handler runs normally and handles the
-    //      actual save (validation + form.submit). If ACF's client-side validation
-    //      then fails, an acf.addAction('validation_failure') listener resets
-    //      bypassValidation so the next click attempt re-runs our check.
+    //   3. "Save anyway" uses form.submit() natively — bypasses ACF's JS
+    //      entirely (all ACF field data is already serialised in hidden inputs).
+    //      tinyMCE.triggerSave() is called first to flush WYSIWYG textareas.
     // =========================================================================
 
     var data    = ( typeof uwgsStoriesData !== 'undefined' ) ? uwgsStoriesData : {};
@@ -1785,16 +1790,15 @@ JS;
     var nonce   = data.altCheckNonce  || '';
     var i18n    = data.i18n           || {};
 
-    // Hard bypass flag — set before a clean-scan re-click or "Save anyway".
-    // Reset by acf validation_failure so the next attempt re-checks alt text.
-    var bypassValidation = false;
+    // One-shot flag: consumed the moment the re-click is handled, so the very
+    // next user-initiated click always re-runs the alt-text scan.
+    var bypassOnce = false;
 
-    // Re-entrancy guard while the async ACF image scan is in-flight, so
-    // rapid button clicks don't kick off parallel scans.
+    // Re-entrancy guard while async AJAX scan is in-flight.
     var scanInFlight = false;
 
     // -------------------------------------------------------------------------
-    // Warning panel (idempotent — built once, reused across saves)
+    // Warning panel (built once, reused across saves)
     // -------------------------------------------------------------------------
 
     var $warning = $( '<div id="uwgs-stories-warning" role="alertdialog" aria-live="assertive" aria-modal="false" tabindex="-1">' );
@@ -1819,13 +1823,13 @@ JS;
                 hideWarning();
                 var form = document.getElementById( 'post' );
                 if ( ! form ) { return; }
-                // Sync TinyMCE WYSIWYG fields (ACF flexible content may have them)
-                // before native submission, since form.submit() skips the submit event.
+                // Flush TinyMCE WYSIWYG fields (ACF flexible content may include them)
+                // before native submission — form.submit() skips the submit event.
                 if ( typeof window.tinyMCE !== 'undefined' ) {
                     try { tinyMCE.triggerSave(); } catch ( err ) {}
                 }
-                // Native form.submit() bypasses ACF's JS and our click listener —
-                // guaranteed no recursion. All ACF hidden inputs are already in the DOM.
+                // Native form.submit(): bypasses ACF's JS and our click listener.
+                // All ACF field data is already in the DOM as hidden inputs.
                 form.submit();
             } );
 
@@ -1867,8 +1871,6 @@ JS;
 
     function getAcfImageIds() {
         var ids = [];
-        // ACF image fields render a hidden input with class "acf-image-value"
-        // containing the attachment ID when an image is selected.
         $( '.acf-field[data-type="image"] input[type="hidden"].acf-image-value,' +
            '.acf-image-uploader input[type="hidden"]' ).each( function() {
             var val = parseInt( $( this ).val(), 10 );
@@ -1900,65 +1902,66 @@ JS;
     }
 
     // -------------------------------------------------------------------------
-    // CLICK INTERCEPT on form#post (capture phase — fires before ACF).
-    // ACF registers jQuery click handlers in bubble phase; capture fires first.
+    // DOCUMENT-LEVEL CLICK INTERCEPT (capture phase — fires before everything).
+    // We bind to document so buttons outside <form id="post"> are also caught.
     // -------------------------------------------------------------------------
 
-    function interceptSaveClicks() {
-        var form = document.getElementById( 'post' );
-        if ( ! form ) { return; }
+    function isSubmitForPostForm( btn ) {
+        // Must be a submit-type button or a known WP publish/save button.
+        if ( btn.type !== 'submit' && btn.id !== 'publish' && btn.id !== 'save-post' && btn.id !== 'save' ) {
+            return false;
+        }
+        // Resolve the associated form: native .form property or the form="…" attribute.
+        var form = btn.form || ( btn.getAttribute( 'form' ) ? document.getElementById( btn.getAttribute( 'form' ) ) : null );
+        if ( ! form && typeof btn.closest === 'function' ) { form = btn.closest( 'form' ); }
+        return ( form && form.id === 'post' );
+    }
 
-        form.addEventListener( 'click', function( e ) {
-            // Hard bypass: a clean-scan re-click or "Save anyway" just went through.
-            if ( bypassValidation ) { return; }
+    function interceptSaveClicks() {
+        document.addEventListener( 'click', function( e ) {
+            // Consume the one-shot bypass immediately so the next user click always re-scans.
+            if ( bypassOnce ) { bypassOnce = false; return; }
 
             // Re-entrancy guard while async scan is in-flight.
             if ( scanInFlight ) { e.preventDefault(); e.stopImmediatePropagation(); return; }
 
-            // Only act on submit-type buttons (WP publish box uses input[type=submit]
-            // with id="publish" or id="save-post" depending on post status).
+            // Walk up from e.target in case the user clicked a child node (e.g. a
+            // <span> inside the button), then verify this targets form#post.
             var btn = e.target;
-            if ( btn.type !== 'submit' &&
-                 btn.id  !== 'publish'  &&
-                 btn.id  !== 'save-post' &&
-                 btn.id  !== 'save' ) { return; }
+            if ( btn.nodeType !== 1 ) { return; } // ignore text nodes
+            if ( ! isSubmitForPostForm( btn ) ) {
+                // Try the closest ancestor button/input in case of inner elements.
+                if ( typeof btn.closest === 'function' ) {
+                    btn = btn.closest( 'input[type="submit"], button[type="submit"]' );
+                    if ( ! btn || ! isSubmitForPostForm( btn ) ) { return; }
+                } else { return; }
+            }
 
             var hasContent = tinyMCEHasMissingAlt();
             var acfIds     = getAcfImageIds();
 
-            // Fast path: nothing to warn about — let ACF handle the click normally.
+            // Fast path: nothing to warn about — let the click through normally.
             if ( ! hasContent && acfIds.length === 0 ) { return; }
 
-            // Halt this click so ACF's handler and the native submit don't fire.
+            // Halt this click (prevents form submit AND ACF's jQuery click handler).
             e.preventDefault();
             e.stopImmediatePropagation();
 
+            var capturedBtn = btn; // close over btn for async callback
             scanInFlight = true;
             checkAcfImagesMissingAlt( acfIds, function( hasFeatured ) {
                 scanInFlight = false;
                 if ( hasContent || hasFeatured ) {
                     showWarning( hasContent, hasFeatured );
                 } else {
-                    // Clean scan — re-click the button with bypass set so ACF
-                    // handles validation and the actual save normally.
-                    bypassValidation = true;
-                    btn.click();
+                    // Clean scan: one-shot bypass then re-click so ACF handles the save.
+                    bypassOnce = true;
+                    capturedBtn.click();
+                    // bypassOnce is reset at the top of this listener on the re-click,
+                    // before any of our other checks run.
                 }
             } );
-        }, true );
-
-        // Reset bypass if ACF's own client-side validation fails after a
-        // clean-scan re-click (page doesn't reload in that case).
-        if ( typeof window.acf !== 'undefined' && typeof acf.addAction === 'function' ) {
-            acf.addAction( 'validation_failure', function() { bypassValidation = false; } );
-        } else {
-            // ACF not yet loaded — attach once it is
-            document.addEventListener( 'acf-loaded', function() {
-                if ( typeof window.acf !== 'undefined' && typeof acf.addAction === 'function' ) {
-                    acf.addAction( 'validation_failure', function() { bypassValidation = false; } );
-                }
-            } );
-        }
+        }, true ); // capture phase
     }
 
     if ( document.readyState === 'loading' ) {
