@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.6
+ * Version:           2.5.7
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.6';
+    const VERSION                = '2.5.7';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -1780,9 +1780,8 @@ JS;
     //        The bypass is consumed immediately on the re-click so the next
     //        user save attempt always re-scans.
     //
-    //   3. "Save anyway" uses form.submit() natively — bypasses ACF's JS
-    //      entirely (all ACF field data is already serialised in hidden inputs).
-    //      tinyMCE.triggerSave() is called first to flush WYSIWYG textareas.
+    //   3. "Save anyway" sets bypassOnce and re-clicks the original button so
+    //      ACF's full save flow runs (nonces, TinyMCE sync, featured image).
     // =========================================================================
 
     var data    = ( typeof uwgsStoriesData !== 'undefined' ) ? uwgsStoriesData : {};
@@ -1793,6 +1792,9 @@ JS;
     // One-shot flag: consumed the moment the re-click is handled, so the very
     // next user-initiated click always re-runs the alt-text scan.
     var bypassOnce = false;
+
+    // The button that triggered the current warning — used by "Save anyway".
+    var capturedBtn = null;
 
     // Re-entrancy guard while async AJAX scan is in-flight.
     var scanInFlight = false;
@@ -1821,16 +1823,11 @@ JS;
             .text( i18n.saveAnyway || 'Save anyway' )
             .on( 'click', function() {
                 hideWarning();
-                var form = document.getElementById( 'post' );
-                if ( ! form ) { return; }
-                // Flush TinyMCE WYSIWYG fields (ACF flexible content may include them)
-                // before native submission — form.submit() skips the submit event.
-                if ( typeof window.tinyMCE !== 'undefined' ) {
-                    try { tinyMCE.triggerSave(); } catch ( err ) {}
-                }
-                // Native form.submit(): bypasses ACF's JS and our click listener.
-                // All ACF field data is already in the DOM as hidden inputs.
-                form.submit();
+                // Re-click the original button with a one-shot bypass so ACF's
+                // full save flow runs normally (nonces, field serialisation,
+                // TinyMCE sync, featured image — everything).
+                bypassOnce = true;
+                if ( capturedBtn ) { capturedBtn.click(); }
             } );
 
         $actions.append( $goBack ).append( $saveAnyway );
@@ -1953,7 +1950,7 @@ JS;
             e.preventDefault();
             e.stopImmediatePropagation();
 
-            var capturedBtn = btn; // close over btn for async callback
+            capturedBtn = btn; // store at module scope for "Save anyway"
             scanInFlight = true;
             checkAcfImagesMissingAlt( acfIds, function( hasFeatured ) {
                 scanInFlight = false;
