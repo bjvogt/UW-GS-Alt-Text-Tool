@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.5
+ * Version:           2.5.6
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.5';
+    const VERSION                = '2.5.6';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -1876,6 +1876,12 @@ JS;
             var val = parseInt( $( this ).val(), 10 );
             if ( val && val > 0 ) { ids.push( val ); }
         } );
+        // Also include the WP native featured image.
+        var thumb = document.getElementById( '_thumbnail_id' );
+        if ( thumb ) {
+            var thumbId = parseInt( thumb.value, 10 );
+            if ( thumbId && thumbId > 0 ) { ids.push( thumbId ); }
+        }
         return ids.filter( function( v, i, a ) { return a.indexOf( v ) === i; } );
     }
 
