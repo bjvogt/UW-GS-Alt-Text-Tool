@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.9
+ * Version:           2.6.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.9';
+    const VERSION                = '2.6.0';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -348,7 +348,13 @@ class UWGS_Alt_Text_Tool {
             wp_send_json_error( __( 'Filenames cannot be used as alt text.', 'uwgs-alt-text-tool' ) );
         }
         update_post_meta( $post_id, self::META_KEY, $alt_text );
-        delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
+        // Only clear the attention flag when the new value passes quality checks;
+        // weak/blank alt text should leave the image flagged for follow-up.
+        if ( ! $this->uwgs_alt_needs_attention( $alt_text ) ) {
+            delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
+        } else {
+            update_post_meta( $post_id, self::NEEDS_ALT_KEY, '1' );
+        }
         wp_send_json_success( array(
             'alt_text'        => $alt_text,
             'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
@@ -1218,6 +1224,10 @@ JS;
     // from triggering parallel scans by mashing Enter while we await AJAX.
     var scanInFlight = false;
 
+    // The submit button that triggered the current scan; held at module scope
+    // so hideWarning() can re-enable it on any dismiss path.
+    var activeSubmitter = null;
+
     function contentHasMissingAlt() {
         var allContent = [];
         if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.editors && tinyMCE.editors.length ) {
@@ -1288,6 +1298,7 @@ JS;
         warningEl.setAttribute( 'role', 'alertdialog' ); warningEl.setAttribute( 'aria-live', 'assertive' );
         warningEl.setAttribute( 'aria-modal', 'true' ); warningEl.setAttribute( 'tabindex', '-1' );
         warningEl.setAttribute( 'aria-labelledby', 'uwgs-presave-warning-title' );
+        warningEl.setAttribute( 'aria-describedby', 'uwgs-presave-warning-body' );
         // Focus trap: cycle Tab within the dialog's focusable buttons.
         warningEl.addEventListener( 'keydown', function( e ) {
             if ( e.key !== 'Tab' ) { return; }
@@ -1337,7 +1348,7 @@ JS;
         preFocusEl = document.activeElement;
         warningEl.innerHTML = '';
         var title = document.createElement( 'strong' ); title.id = 'uwgs-presave-warning-title'; title.textContent = i18n.warningTitle || '⚠ Accessibility: Images missing alt text';
-        var body = document.createElement( 'p' ); body.textContent = hasContent && hasFeatured ? i18n.warningBodyBoth : hasFeatured ? i18n.warningBodyFeatured : i18n.warningBodyContent;
+        var body = document.createElement( 'p' ); body.id = 'uwgs-presave-warning-body'; body.textContent = hasContent && hasFeatured ? i18n.warningBodyBoth : hasFeatured ? i18n.warningBodyFeatured : i18n.warningBodyContent;
         var actions = document.createElement( 'div' ); actions.className = 'uwgs-warning-actions';
         var goBack = document.createElement( 'button' ); goBack.type = 'button'; goBack.className = 'button button-primary'; goBack.textContent = i18n.goBack || 'Go back and fix';
         goBack.addEventListener( 'click', function() { hideWarning(); if ( typeof window.tinyMCE !== 'undefined' && tinyMCE.activeEditor ) { tinyMCE.activeEditor.focus(); } } );
@@ -1352,12 +1363,17 @@ JS;
         } );
         actions.appendChild( goBack ); actions.appendChild( saveAnyway );
         warningEl.appendChild( title ); warningEl.appendChild( body ); warningEl.appendChild( actions );
+        // Prevent background scroll while dialog is open.
+        document.body.style.overflow = 'hidden';
         warningEl.classList.add( 'visible' ); goBack.focus();
     }
 
     function hideWarning() {
         warningEl.classList.remove( 'visible' );
         warningEl.innerHTML = '';
+        document.body.style.overflow = '';
+        // Re-enable the button that triggered the scan so the user can retry.
+        if ( activeSubmitter ) { activeSubmitter.disabled = false; activeSubmitter = null; }
         if ( preFocusEl && typeof preFocusEl.focus === 'function' ) { try { preFocusEl.focus(); } catch(e) {} }
         preFocusEl = null;
     }
@@ -1394,14 +1410,21 @@ JS;
             e.preventDefault();
             e.stopImmediatePropagation();
 
+            // Disable the triggering button to block double-clicks / autosave
+            // races during the async scan; restored in hideWarning() or below.
+            activeSubmitter = submitter;
+            if ( submitter ) { submitter.disabled = true; }
+
             scanInFlight = true;
             featuredImageMissingAlt().then( function( hasFeatured ) {
                 scanInFlight = false;
                 if ( hasContent || hasFeatured ) {
                     showWarning( hasContent, hasFeatured, submitter );
+                    // button stays disabled until hideWarning() re-enables it
                 } else {
-                    // Clean scan — bypass our own check on resubmit and let
-                    // the form go through naturally so other handlers run.
+                    // Clean scan — re-enable before resubmit so WP submit
+                    // handlers see the button in its normal state.
+                    if ( activeSubmitter ) { activeSubmitter.disabled = false; activeSubmitter = null; }
                     bypassValidation = true;
                     resubmitForm( form, submitter, /* useDirectSubmit */ false );
                 }
@@ -1827,7 +1850,7 @@ JS;
     // Warning panel (built once, reused across saves)
     // -------------------------------------------------------------------------
 
-    var $warning    = $( '<div id="uwgs-stories-warning" role="alertdialog" aria-live="assertive" aria-modal="true" aria-labelledby="uwgs-stories-warning-title" tabindex="-1">' );
+    var $warning    = $( '<div id="uwgs-stories-warning" role="alertdialog" aria-live="assertive" aria-modal="true" aria-labelledby="uwgs-stories-warning-title" aria-describedby="uwgs-stories-warning-body" tabindex="-1">' );
     var preFocusEl  = null;
     $( function() {
         $( 'body' ).append( $warning );
@@ -1852,7 +1875,7 @@ JS;
                      : hasFeatured                  ? i18n.warningBodyFeatured
                                                     : i18n.warningBodyContent;
         var $title   = $( '<strong id="uwgs-stories-warning-title">' ).text( i18n.warningTitle || '⚠ Accessibility: Images missing alt text' );
-        var $body    = $( '<p>' ).text( bodyText );
+        var $body    = $( '<p id="uwgs-stories-warning-body">' ).text( bodyText );
         var $actions = $( '<div class="uwgs-stories-warning-actions">' );
 
         var $goBack = $( '<button type="button" class="button button-primary">' )
@@ -1875,12 +1898,17 @@ JS;
 
         $actions.append( $goBack ).append( $saveAnyway );
         $warning.append( $title ).append( $body ).append( $actions );
+        // Prevent background scroll while dialog is open.
+        document.body.style.overflow = 'hidden';
         $warning.addClass( 'visible' );
         $goBack[0].focus();
     }
 
     function hideWarning() {
         $warning.removeClass( 'visible' ).empty();
+        document.body.style.overflow = '';
+        // Re-enable the save button so the user can retry after Go Back / Escape.
+        if ( capturedBtn ) { capturedBtn.disabled = false; }
         if ( preFocusEl && typeof preFocusEl.focus === 'function' ) { try { preFocusEl.focus(); } catch(e) {} }
         preFocusEl = null;
     }
@@ -1997,14 +2025,19 @@ JS;
             e.stopImmediatePropagation();
 
             capturedBtn = btn; // store at module scope for "Save anyway"
+            // Disable the button to block double-clicks / autosave races;
+            // restored in hideWarning() on dismiss or below on clean scan.
+            btn.disabled = true;
             scanInFlight = true;
             checkAcfImagesMissingAlt( acfIds, function( hasFeatured ) {
                 scanInFlight = false;
                 if ( hasContent || hasFeatured ) {
                     showWarning( hasContent, hasFeatured );
+                    // button stays disabled until hideWarning() re-enables it
                 } else {
-                    // Clean scan: use requestSubmit so ACF's full save flow runs
-                    // reliably from this async context. Fall back to click().
+                    // Clean scan: re-enable before resubmit so ACF sees the
+                    // button in its normal state during the save flow.
+                    capturedBtn.disabled = false;
                     var form = document.getElementById( 'post' );
                     if ( form && typeof form.requestSubmit === 'function' && capturedBtn ) {
                         try { form.requestSubmit( capturedBtn ); return; } catch ( err ) {}
