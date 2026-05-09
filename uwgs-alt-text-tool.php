@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.8
+ * Version:           2.5.9
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.8';
+    const VERSION                = '2.5.9';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -411,7 +411,7 @@ class UWGS_Alt_Text_Tool {
         if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ALT_CHECK ) ) {
             wp_send_json_error( 'Security check failed.' );
         }
-        if ( ! current_user_can( 'edit_posts' ) ) { wp_send_json_error( 'Insufficient permissions.' ); }
+        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Insufficient permissions.' ); }
         $attachment_id = isset( $_POST['attachment_id'] ) ? absint( $_POST['attachment_id'] ) : 0;
         if ( ! $attachment_id ) { wp_send_json_error( 'Invalid attachment ID.' ); }
         if ( 'attachment' !== get_post_type( $attachment_id ) ) { wp_send_json_error( 'Not an attachment.' ); }
@@ -565,6 +565,8 @@ class UWGS_Alt_Text_Tool {
                 color:#1d2327;
                 line-height:1.6;
             }
+            .uwgs-alt-wrap button:focus-visible,
+            .uwgs-alt-wrap textarea:focus-visible { outline:2px solid #0073aa; outline-offset:2px; }
         ';
 
         wp_register_style( 'uwgs-alt-text-tool', false, array(), self::VERSION );
@@ -791,7 +793,7 @@ jQuery( function( $ ) {
         }
 
         $btn.prop( 'disabled', true );
-        $spinner.addClass( 'is-active' ).attr( 'aria-hidden', 'false' );
+        $spinner.addClass( 'is-active' ).attr( 'aria-hidden', 'true' );
         $fb.text( '' ).removeClass( 'success error' );
 
         $.ajax( {
@@ -1144,6 +1146,8 @@ JS;
             #uwgs-presave-warning strong   { display:block; margin-bottom:8px; font-size:14px; }
             #uwgs-presave-warning p        { margin:0 0 12px; }
             #uwgs-presave-warning.uwgs-warning-actions { display:flex; gap:8px; align-items:center; }
+            #uwgs-presave-warning button:focus-visible,
+            #uwgs-inline-notice    button:focus-visible { outline:2px solid #0073aa; outline-offset:2px; }
         ';
 
         wp_register_style( 'uwgs-classic-presave', false, array(), self::VERSION );
@@ -1204,7 +1208,7 @@ JS;
 
     var data = ( typeof uwgsPresaveData !== 'undefined' ) ? uwgsPresaveData : {};
     var ajaxUrl = data.ajaxUrl || ''; var nonce = data.altCheckNonce || ''; var i18n = data.i18n || {};
-    var warningEl = null, noticeEl = null; var noticeDismissed = false;
+    var warningEl = null, noticeEl = null; var noticeDismissed = false; var preFocusEl = null;
 
     // Hard bypass flag — once set, our submit listener returns immediately.
     // Set by "Save anyway" and by the clean-scan resubmit path.
@@ -1282,7 +1286,20 @@ JS;
     function buildWarningPanel() {
         warningEl = document.createElement( 'div' ); warningEl.id = 'uwgs-presave-warning';
         warningEl.setAttribute( 'role', 'alertdialog' ); warningEl.setAttribute( 'aria-live', 'assertive' );
-        warningEl.setAttribute( 'aria-modal', 'false' ); warningEl.setAttribute( 'tabindex', '-1' );
+        warningEl.setAttribute( 'aria-modal', 'true' ); warningEl.setAttribute( 'tabindex', '-1' );
+        warningEl.setAttribute( 'aria-labelledby', 'uwgs-presave-warning-title' );
+        // Focus trap: cycle Tab within the dialog's focusable buttons.
+        warningEl.addEventListener( 'keydown', function( e ) {
+            if ( e.key !== 'Tab' ) { return; }
+            var focusable = warningEl.querySelectorAll( 'button' );
+            if ( ! focusable.length ) { return; }
+            var first = focusable[0], last = focusable[ focusable.length - 1 ];
+            if ( e.shiftKey ) {
+                if ( document.activeElement === first ) { e.preventDefault(); last.focus(); }
+            } else {
+                if ( document.activeElement === last ) { e.preventDefault(); first.focus(); }
+            }
+        } );
         document.body.appendChild( warningEl );
     }
 
@@ -1317,8 +1334,9 @@ JS;
     }
 
     function showWarning( hasContent, hasFeatured, submitter ) {
+        preFocusEl = document.activeElement;
         warningEl.innerHTML = '';
-        var title = document.createElement( 'strong' ); title.textContent = i18n.warningTitle || '⚠ Accessibility: Images missing alt text';
+        var title = document.createElement( 'strong' ); title.id = 'uwgs-presave-warning-title'; title.textContent = i18n.warningTitle || '⚠ Accessibility: Images missing alt text';
         var body = document.createElement( 'p' ); body.textContent = hasContent && hasFeatured ? i18n.warningBodyBoth : hasFeatured ? i18n.warningBodyFeatured : i18n.warningBodyContent;
         var actions = document.createElement( 'div' ); actions.className = 'uwgs-warning-actions';
         var goBack = document.createElement( 'button' ); goBack.type = 'button'; goBack.className = 'button button-primary'; goBack.textContent = i18n.goBack || 'Go back and fix';
@@ -1334,10 +1352,15 @@ JS;
         } );
         actions.appendChild( goBack ); actions.appendChild( saveAnyway );
         warningEl.appendChild( title ); warningEl.appendChild( body ); warningEl.appendChild( actions );
-        warningEl.classList.add( 'visible' ); warningEl.focus();
+        warningEl.classList.add( 'visible' ); goBack.focus();
     }
 
-    function hideWarning() { warningEl.classList.remove( 'visible' ); warningEl.innerHTML = ''; }
+    function hideWarning() {
+        warningEl.classList.remove( 'visible' );
+        warningEl.innerHTML = '';
+        if ( preFocusEl && typeof preFocusEl.focus === 'function' ) { try { preFocusEl.focus(); } catch(e) {} }
+        preFocusEl = null;
+    }
 
     // Single delegated submit interception on form#post. Capture phase so we
     // run before WordPress's own bubble-phase handlers and before jQuery
@@ -1722,6 +1745,7 @@ JS;
             #uwgs-stories-warning strong  { display:block; margin-bottom:8px; font-size:14px; }
             #uwgs-stories-warning p       { margin:0 0 12px; }
             .uwgs-stories-warning-actions { display:flex; gap:8px; align-items:center; }
+            #uwgs-stories-warning button:focus-visible { outline:2px solid #0073aa; outline-offset:2px; }
         ';
 
         wp_register_style( 'uwgs-stories-warning', false, array(), self::VERSION );
@@ -1803,15 +1827,31 @@ JS;
     // Warning panel (built once, reused across saves)
     // -------------------------------------------------------------------------
 
-    var $warning = $( '<div id="uwgs-stories-warning" role="alertdialog" aria-live="assertive" aria-modal="false" tabindex="-1">' );
-    $( function() { $( 'body' ).append( $warning ); } );
+    var $warning    = $( '<div id="uwgs-stories-warning" role="alertdialog" aria-live="assertive" aria-modal="true" aria-labelledby="uwgs-stories-warning-title" tabindex="-1">' );
+    var preFocusEl  = null;
+    $( function() {
+        $( 'body' ).append( $warning );
+        // Focus trap: cycle Tab within the dialog's focusable buttons.
+        $warning[0].addEventListener( 'keydown', function( e ) {
+            if ( e.key !== 'Tab' ) { return; }
+            var focusable = $warning[0].querySelectorAll( 'button' );
+            if ( ! focusable.length ) { return; }
+            var first = focusable[0], last = focusable[ focusable.length - 1 ];
+            if ( e.shiftKey ) {
+                if ( document.activeElement === first ) { e.preventDefault(); last.focus(); }
+            } else {
+                if ( document.activeElement === last ) { e.preventDefault(); first.focus(); }
+            }
+        } );
+    } );
 
     function showWarning( hasContent, hasFeatured ) {
+        preFocusEl = document.activeElement;
         $warning.empty();
         var bodyText = ( hasContent && hasFeatured ) ? i18n.warningBodyBoth
                      : hasFeatured                  ? i18n.warningBodyFeatured
                                                     : i18n.warningBodyContent;
-        var $title   = $( '<strong>' ).text( i18n.warningTitle || '⚠ Accessibility: Images missing alt text' );
+        var $title   = $( '<strong id="uwgs-stories-warning-title">' ).text( i18n.warningTitle || '⚠ Accessibility: Images missing alt text' );
         var $body    = $( '<p>' ).text( bodyText );
         var $actions = $( '<div class="uwgs-stories-warning-actions">' );
 
@@ -1835,11 +1875,14 @@ JS;
 
         $actions.append( $goBack ).append( $saveAnyway );
         $warning.append( $title ).append( $body ).append( $actions );
-        $warning.addClass( 'visible' ).trigger( 'focus' );
+        $warning.addClass( 'visible' );
+        $goBack[0].focus();
     }
 
     function hideWarning() {
         $warning.removeClass( 'visible' ).empty();
+        if ( preFocusEl && typeof preFocusEl.focus === 'function' ) { try { preFocusEl.focus(); } catch(e) {} }
+        preFocusEl = null;
     }
 
     $( document ).on( 'keydown', function( e ) {
