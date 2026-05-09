@@ -8,6 +8,10 @@ jQuery( function( $ ) {
     var altIsBlank = data.altIsBlank   || false;
     var warned     = false;
 
+    // Filename sanitization and classification delegated to UWGSAltUtils
+    // (uwgs-alt-utils.js), which is the canonical source for all scoring logic.
+    var Utils = window.UWGSAltUtils;
+
     // FIX v2.4.4 (Issue 3): Broadened selector — tries multiple possible
     // field IDs used by WordPress on the attachment edit screen.
     var $altField = $( '#attachment_alt' ).add( $( 'input[name="attachments[' + $( 'input[name^="post_ID"]' ).val() + '][_wp_attachment_image_alt]"]' ) ).first();
@@ -33,44 +37,6 @@ jQuery( function( $ ) {
 
     var $submitBtn = $( '#publish, #save-post, input[name="save"], input[type="submit"]' );
 
-    var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
-
-    function sanitizeFilename( raw ) {
-        var s = raw;
-        s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
-        s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
-        s = s.replace( /[-_]+/g, ' ' );
-        s = s.replace( /\b\d+x\d+\b/gi, '' );
-        s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-        s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
-        s = s.replace( /\bscaled\b/gi, '' );
-        s = s.replace( /\b\d{1,2}\b/g, '' );
-        s = s.replace( /\s{2,}/g, ' ' ).trim();
-        s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
-        return s;
-    }
-
-    function classifyFilename( value ) {
-        var sanitized = sanitizeFilename( value );
-        var original  = value;
-        if ( /^https?:\/\//i.test( original ) || /^www\./i.test( original ) ) { return 'invalid'; }
-        if ( IMAGE_EXTENSIONS.test( original ) || IMAGE_EXTENSIONS.test( sanitized ) ) { return 'invalid'; }
-        if ( sanitized.length < 5 ) { return 'invalid'; }
-        if ( /^(IMG|DSC|DSCN|MVI|MOV|P\d)[_\-\s]/i.test( original ) ) { return 'invalid'; }
-        var tokens = sanitized.split( /\s+/ ).filter( function( t ) { return t.length > 0; } );
-        var meaningfulWords = tokens.filter( function( t ) {
-            if ( t.length <= 1 ) { return false; }
-            if ( /^\d+$/.test( t ) ) { return false; }
-            if ( /^[A-Z0-9]+$/.test( t ) && ! /[AEIOU]/i.test( t ) ) { return false; }
-            return true;
-        } );
-        if ( meaningfulWords.length === 0 ) { return 'invalid'; }
-        var junkTokens = tokens.filter( function( t ) { return /^\d+$/.test( t ) || ( t.length <= 3 && /^[A-Z0-9]+$/i.test( t ) ); } );
-        if ( junkTokens.length > tokens.length / 2 ) { return 'invalid'; }
-        if ( meaningfulWords.length === 1 && tokens.length === 1 ) { return 'weak'; }
-        return 'good';
-    }
-
     // Show inline page notice if alt is blank on load
     if ( altIsBlank ) {
         var $blankNotice = $( '<div>' ).addClass( 'uwgs-attachment-blank-notice' ).text( i18n.blankNotice || '⚠ This image has no alt text. Please add a description below.' );
@@ -85,8 +51,8 @@ jQuery( function( $ ) {
             $altField.val( suggestion.value );
             hintText = i18n.fromCaption || 'Suggested from caption — please review before saving';
         } else {
-            var sanitized  = sanitizeFilename( suggestion.value );
-            var confidence = classifyFilename( suggestion.value );
+            var sanitized  = Utils.sanitizeFilename( suggestion.value );
+            var confidence = Utils.classifyFilename( suggestion.value );
             if ( confidence === 'good' ) {
                 $altField.val( sanitized );
                 hintText = i18n.fromFilename || 'Suggested from filename — please review before saving';

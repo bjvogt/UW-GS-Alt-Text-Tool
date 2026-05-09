@@ -6,53 +6,18 @@ jQuery( function( $ ) {
     var instructions = data.instructions || '';
     var i18n         = data.i18n        || {};
 
-    var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
+    // Quality functions and suggestion classification delegated to UWGSAltUtils
+    // (uwgs-alt-utils.js), which is the canonical source for all scoring logic.
+    var Utils = window.UWGSAltUtils;
 
     // -------------------------------------------------------------------------
-    // Suggestion classification
+    // Pre-classify suggestions on page load so we can decide which rows to
+    // pre-populate without re-evaluating on every access.
     // -------------------------------------------------------------------------
-
-    function sanitizeFilename( raw ) {
-        var s = raw;
-        s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
-        s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
-        s = s.replace( /[-_]+/g, ' ' );
-        s = s.replace( /\b\d+x\d+\b/gi, '' );
-        s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-        s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
-        s = s.replace( /\bscaled\b/gi, '' );
-        s = s.replace( /\b\d{1,2}\b/g, '' );
-        s = s.replace( /\s{2,}/g, ' ' ).trim();
-        s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
-        return s;
-    }
-
-    function classifySuggestion( suggestion ) {
-        if ( ! suggestion ) { return 'invalid'; }
-        if ( suggestion.type === 'caption' ) { return 'good'; }
-        var sanitized = sanitizeFilename( suggestion.value );
-        var original  = suggestion.value;
-        if ( /^https?:\/\//i.test( original.trim() ) || /^www\./i.test( original.trim() ) ) { return 'invalid'; }
-        if ( IMAGE_EXTENSIONS.test( original.trim() ) || IMAGE_EXTENSIONS.test( sanitized ) ) { return 'invalid'; }
-        if ( sanitized.length < 5 ) { return 'invalid'; }
-        if ( /^(IMG|DSC|DSCN|MVI|MOV|P\d)[_\-\s]/i.test( original.trim() ) ) { return 'invalid'; }
-        var tokens = sanitized.split( /\s+/ ).filter( function( t ) { return t.length > 0; } );
-        var meaningfulWords = tokens.filter( function( t ) {
-            if ( t.length <= 1 ) { return false; }
-            if ( /^\d+$/.test( t ) ) { return false; }
-            if ( /^[A-Z0-9]+$/.test( t ) && ! /[AEIOU]/i.test( t ) ) { return false; }
-            return true;
-        } );
-        if ( meaningfulWords.length === 0 ) { return 'invalid'; }
-        var junkTokens = tokens.filter( function( t ) { return /^\d+$/.test( t ) || ( t.length <= 3 && /^[A-Z0-9]+$/i.test( t ) ); } );
-        if ( junkTokens.length > tokens.length / 2 ) { return 'invalid'; }
-        if ( meaningfulWords.length === 1 && tokens.length === 1 ) { return 'weak'; }
-        return 'good';
-    }
 
     var classified = {};
     Object.keys( suggestions ).forEach( function( k ) {
-        classified[ String( k ) ] = classifySuggestion( suggestions[ k ] );
+        classified[ String( k ) ] = Utils.classifySuggestion( suggestions[ k ] );
     } );
 
     // -------------------------------------------------------------------------
@@ -67,24 +32,12 @@ jQuery( function( $ ) {
     }
 
     // -------------------------------------------------------------------------
-    // Input validation
-    // -------------------------------------------------------------------------
-
-    function validateAltText( value ) {
-        var trimmed = value.trim();
-        if ( trimmed === '' ) { return i18n.emptyBlocked || 'Please enter a description before saving.'; }
-        if ( /^https?:\/\//i.test( trimmed ) || /^www\./i.test( trimmed ) ) { return i18n.urlRejected || 'URLs cannot be used as alt text.'; }
-        if ( IMAGE_EXTENSIONS.test( trimmed ) ) { return i18n.filenameRejected || 'Filenames cannot be used as alt text.'; }
-        return null;
-    }
-
-    // -------------------------------------------------------------------------
     // On page load: pre-populate textareas that have a "good" suggestion
     // -------------------------------------------------------------------------
 
     $( '.uwgs-alt-input' ).each( function() {
-        var $ta     = $( this );
-        var postId  = String( $ta.data( 'post-id' ) );
+        var $ta        = $( this );
+        var postId     = String( $ta.data( 'post-id' ) );
         var confidence = classified[ postId ] || null;
         var suggestion = suggestions[ postId ] || null;
 
@@ -92,9 +45,9 @@ jQuery( function( $ ) {
 
         var altText = suggestion.type === 'caption'
             ? suggestion.value
-            : sanitizeFilename( suggestion.value );
+            : Utils.sanitizeFilename( suggestion.value );
 
-        if ( ! altText || validateAltText( altText ) ) { return; }
+        if ( ! altText || Utils.validateAltText( altText, i18n ) ) { return; }
 
         $ta.val( altText );
 
@@ -148,7 +101,7 @@ jQuery( function( $ ) {
         var nonce   = $currentWrap.find( '.uwgs-alt-save-btn' ).data( 'nonce' );
         var postId  = String( $currentWrap.data( 'post-id' ) );
         var altText = $thisInput.val().trim();
-        var err     = validateAltText( altText );
+        var err     = Utils.validateAltText( altText, i18n );
 
         if ( err ) {
             $currentWrap.attr( 'data-uwgs-state', 'invalid' );
@@ -181,7 +134,7 @@ jQuery( function( $ ) {
         var $spinner = $wrap.find( '.uwgs-alt-spinner' );
         var $fb      = $wrap.find( '.uwgs-alt-feedback' );
 
-        var err = validateAltText( altText );
+        var err = Utils.validateAltText( altText, i18n );
         if ( err ) {
             $wrap.attr( 'data-uwgs-state', 'invalid' );
             $fb.text( '✗ ' + err ).removeClass( 'success warning' ).addClass( 'error' );

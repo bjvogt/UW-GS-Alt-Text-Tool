@@ -16,6 +16,15 @@
     var ajaxUrl = data.ajaxUrl || ''; var nonce = data.altCheckNonce || ''; var i18n = data.i18n || {};
     var warningEl = null, noticeEl = null; var noticeDismissed = false; var preFocusEl = null;
 
+    // Options object passed to UWGSAltUtils.rest.checkBatch — built once, reused.
+    // REST is tried first; admin-ajax is the fallback. See uwgs-alt-utils.js.
+    var checkOpts = {
+        restUrl:   data.restUrl   || '',
+        restNonce: data.restNonce || '',
+        ajaxUrl:   ajaxUrl,
+        ajaxNonce: nonce,
+    };
+
     // Hard bypass flag — once set, our submit listener returns immediately.
     // Set by "Save anyway" and by the clean-scan resubmit path.
     var bypassValidation = false;
@@ -56,24 +65,15 @@
         return 0;
     }
 
-    // Single batched request: sends all IDs at once, returns per-ID results.
+    // Batch request via UWGSAltUtils.rest.checkBatch — REST first, admin-ajax fallback.
     // Replaces the former single-ID uwgs_get_attachment_alt call.
     function featuredImageMissingAlt() {
         return new Promise( function( resolve ) {
             var thumbnailId = getFeaturedImageId();
             if ( ! thumbnailId ) { resolve( false ); return; }
-            var formData = new FormData();
-            formData.append( 'action', 'uwgs_check_attachments_alt_batch' );
-            formData.append( 'nonce', nonce );
-            formData.append( 'ids[]', thumbnailId );
-            fetch( ajaxUrl, { method: 'POST', body: formData } )
-                .then( function( r ) { return r.json(); } )
-                .then( function( response ) {
-                    if ( ! response.success ) { resolve( false ); return; }
-                    var result = response.data[ String( thumbnailId ) ];
-                    resolve( !! ( result && result.needs_attention ) );
-                } )
-                .catch( function() { resolve( false ); } );
+            window.UWGSAltUtils.rest.checkBatch( [ thumbnailId ], checkOpts, function( missing ) {
+                resolve( missing );
+            } );
         } );
     }
 

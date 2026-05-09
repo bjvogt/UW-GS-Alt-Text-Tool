@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.7.0
+ * Version:           2.8.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -25,6 +25,138 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+// =============================================================================
+// ALT TEXT QUALITY SERVICE
+//
+// Single canonical source for all alt-text quality evaluation. PHP code inside
+// UWGS_Alt_Text_Tool delegates here; the JavaScript mirror is UWGSAltUtils
+// (js/uwgs-alt-utils.js). When a rule changes, update BOTH files and the
+// get_rules_description() documentation returned to the settings page.
+// =============================================================================
+
+class UWGS_Alt_Quality {
+
+    // Must stay in sync with UWGSAltUtils.IMAGE_EXTENSIONS in JS.
+    const IMAGE_EXTENSIONS = array(
+        'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg',
+        'bmp', 'tif', 'tiff', 'avif', 'heic', 'heif',
+    );
+
+    // Must stay in sync with UWGSAltUtils.LOW_QUALITY_WORDS in JS.
+    const LOW_QUALITY_WORDS = array(
+        'image', 'photo', 'img', 'picture', 'screenshot',
+        'graphic', 'thumbnail', 'banner', 'logo', 'icon',
+    );
+
+    /**
+     * Returns true if the alt text requires editorial attention.
+     *
+     * A value needing attention is: empty, too short, a URL, an image filename,
+     * all-numeric, a single low-quality word, or a camera-roll filename pattern.
+     * Mirrors UWGSAltUtils.needsAttention() in JavaScript exactly.
+     */
+    public static function needs_attention( $alt ) {
+        $trimmed = trim( (string) $alt );
+        if ( $trimmed === '' ) { return true; }
+        if ( mb_strlen( $trimmed ) < 3 ) { return true; }
+        if ( preg_match( '/^https?:\/\//i', $trimmed ) ) { return true; }
+        if ( preg_match( '/^www\./i', $trimmed ) ) { return true; }
+        $ext_pattern = '/\.('. implode( '|', self::IMAGE_EXTENSIONS ). ')$/i';
+        if ( preg_match( $ext_pattern, $trimmed ) ) { return true; }
+        if ( ctype_digit( str_replace( ' ', '', $trimmed ) ) ) { return true; }
+        if ( in_array( strtolower( $trimmed ), self::LOW_QUALITY_WORDS, true ) ) { return true; }
+        if ( preg_match( '/^[a-z]{1,6}[_\-]\d+$/i', $trimmed ) ) { return true; }
+        return false;
+    }
+
+    /**
+     * Classifies alt text quality as 'good', 'weak', or 'invalid'.
+     *
+     * 'invalid' — triggers any needs_attention rule (plus single-word variants).
+     * 'weak'    — single word that passes all invalid rules.
+     * 'good'    — two or more words, all rules pass.
+     *
+     * Mirrors UWGSAltUtils.classify() in JavaScript exactly.
+     */
+    public static function classify( $alt ) {
+        $trimmed = trim( (string) $alt );
+        if ( $trimmed === '' ) { return 'invalid'; }
+        if ( preg_match( '/^https?:\/\//i', $trimmed ) ) { return 'invalid'; }
+        if ( preg_match( '/^www\./i', $trimmed ) ) { return 'invalid'; }
+        $ext_pattern = '/\.('. implode( '|', self::IMAGE_EXTENSIONS ). ')$/i';
+        if ( preg_match( $ext_pattern, $trimmed ) ) { return 'invalid'; }
+        if ( mb_strlen( $trimmed ) < 3 ) { return 'invalid'; }
+        if ( ctype_digit( str_replace( ' ', '', $trimmed ) ) ) { return 'invalid'; }
+        if ( in_array( strtolower( $trimmed ), self::LOW_QUALITY_WORDS, true ) ) { return 'invalid'; }
+        if ( preg_match( '/^[a-z]{1,6}[_\-]\d+$/i', $trimmed ) ) { return 'invalid'; }
+        $words = preg_split( '/\s+/', $trimmed, -1, PREG_SPLIT_NO_EMPTY );
+        if ( count( $words ) === 1 ) { return 'weak'; }
+        return 'good';
+    }
+
+    /**
+     * Returns human-readable rule descriptions for the settings page.
+     * Keep this list in sync with the rule code above and with UWGSAltUtils.
+     */
+    public static function get_rules_description() {
+        return array(
+            array(
+                'label'       => __( 'Empty or missing', 'uwgs-alt-text-tool' ),
+                'description' => __( 'Any image with no alt text is flagged as needing attention.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'Under 3 characters', 'uwgs-alt-text-tool' ),
+                'description' => __( 'Alt text must be at least 3 characters long.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'URL or web address', 'uwgs-alt-text-tool' ),
+                'description' => __( 'Text beginning with http://, https://, or www. is rejected — these are not meaningful descriptions.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'Image filename', 'uwgs-alt-text-tool' ),
+                'description' => sprintf(
+                    /* translators: %s: comma-separated list of rejected extensions */
+                    __( 'Text ending in a recognized image extension (%s) is rejected. Write a description, not a filename.', 'uwgs-alt-text-tool' ),
+                    '.' . implode( ', .', self::IMAGE_EXTENSIONS )
+                ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'All-numeric', 'uwgs-alt-text-tool' ),
+                'description' => __( 'Text consisting entirely of digits is flagged as uninformative.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'Generic single word', 'uwgs-alt-text-tool' ),
+                'description' => sprintf(
+                    /* translators: %s: comma-separated list of rejected words */
+                    __( 'The following words used alone are rejected as too generic: %s.', 'uwgs-alt-text-tool' ),
+                    implode( ', ', self::LOW_QUALITY_WORDS )
+                ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'Camera roll filename pattern', 'uwgs-alt-text-tool' ),
+                'description' => __( 'Patterns like IMG_1234, DSC0001, or P5_20 are recognized as camera filenames and flagged as not descriptive.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'needs_attention',
+            ),
+            array(
+                'label'       => __( 'Single meaningful word', 'uwgs-alt-text-tool' ),
+                'description' => __( 'A single word that passes all other checks saves successfully but is marked "weak quality" — a badge indicates it could be improved with more detail.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'weak',
+            ),
+            array(
+                'label'       => __( 'Two or more meaningful words', 'uwgs-alt-text-tool' ),
+                'description' => __( 'Alt text with at least two words that pass all checks is classified as good quality and shown in green.', 'uwgs-alt-text-tool' ),
+                'outcome'     => 'good',
+            ),
+        );
+    }
+}
+
 class UWGS_Alt_Text_Tool {
 
     const NONCE_ACTION           = 'uwgs_alt_text_inline_save';
@@ -32,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.7.0';
+    const VERSION                = '2.8.0';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -71,6 +203,7 @@ class UWGS_Alt_Text_Tool {
         add_action( 'admin_init',                      array( $this, 'register_settings' ) );
         // uw_stories ACF-based save warning (hooked via admin_enqueue_scripts)
         add_action( 'admin_enqueue_scripts',           array( $this, 'enqueue_uw_stories_assets' ) );
+        add_action( 'rest_api_init',                   array( $this, 'register_rest_routes' ) );
     }
 
     // =========================================================================
@@ -78,33 +211,11 @@ class UWGS_Alt_Text_Tool {
     // =========================================================================
 
     private function uwgs_alt_needs_attention( $alt ) {
-        $trimmed = trim( (string) $alt );
-        if ( $trimmed === '' ) { return true; }
-        if ( mb_strlen( $trimmed ) < 3 ) { return true; }
-        if ( preg_match( '/^https?:\/\//i', $trimmed ) ) { return true; }
-        if ( preg_match( '/^www\./i', $trimmed ) ) { return true; }
-        $ext_pattern = '/\.('. implode( '|', self::IMAGE_EXTENSIONS ). ')$/i';
-        if ( preg_match( $ext_pattern, $trimmed ) ) { return true; }
-        if ( ctype_digit( str_replace( ' ', '', $trimmed ) ) ) { return true; }
-        if ( in_array( strtolower( $trimmed ), self::LOW_QUALITY_WORDS, true ) ) { return true; }
-        if ( preg_match( '/^[a-z]{1,6}[_\-]\d+$/i', $trimmed ) ) { return true; }
-        return false;
+        return UWGS_Alt_Quality::needs_attention( $alt );
     }
 
     private function uwgs_classify_alt( $alt ) {
-        $trimmed = trim( (string) $alt );
-        if ( $trimmed === '' ) { return 'invalid'; }
-        if ( preg_match( '/^https?:\/\//i', $trimmed ) ) { return 'invalid'; }
-        if ( preg_match( '/^www\./i', $trimmed ) ) { return 'invalid'; }
-        $ext_pattern = '/\.('. implode( '|', self::IMAGE_EXTENSIONS ). ')$/i';
-        if ( preg_match( $ext_pattern, $trimmed ) ) { return 'invalid'; }
-        if ( mb_strlen( $trimmed ) < 3 ) { return 'invalid'; }
-        if ( ctype_digit( str_replace( ' ', '', $trimmed ) ) ) { return 'invalid'; }
-        if ( in_array( strtolower( $trimmed ), self::LOW_QUALITY_WORDS, true ) ) { return 'invalid'; }
-        if ( preg_match( '/^[a-z]{1,6}[_\-]\d+$/i', $trimmed ) ) { return 'invalid'; }
-        $words = preg_split( '/\s+/', $trimmed, -1, PREG_SPLIT_NO_EMPTY );
-        if ( count( $words ) === 1 ) { return 'weak'; }
-        return 'good';
+        return UWGS_Alt_Quality::classify( $alt );
     }
 
     // =========================================================================
@@ -459,6 +570,125 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
+    // REST API: ROUTES + HANDLERS
+    //
+    // Namespace: uwgs-alt-text/v1
+    // All routes require upload_files capability, verified via permission_callback.
+    // Nonce is the standard WP REST nonce (wp_rest), supplied to JS via
+    // wp_create_nonce('wp_rest') in the enqueue functions.
+    // =========================================================================
+
+    public function register_rest_routes() {
+        $namespace = 'uwgs-alt-text/v1';
+
+        // GET /uwgs-alt-text/v1/attachments/{id} — single attachment alt status.
+        register_rest_route( $namespace, '/attachments/(?P<id>\d+)', array(
+            'methods'             => 'GET',
+            'callback'            => array( $this, 'rest_get_attachment_alt' ),
+            'permission_callback' => function() { return current_user_can( 'upload_files' ); },
+            'args'                => array(
+                'id' => array( 'validate_callback' => function( $v ) { return is_numeric( $v ) && (int) $v > 0; } ),
+            ),
+        ) );
+
+        // POST /uwgs-alt-text/v1/attachments/check — batch alt-status check.
+        // Body: { ids: [1, 2, 3] }
+        // Response: { "1": { alt, has_alt, needs_attention, classification }, … }
+        register_rest_route( $namespace, '/attachments/check', array(
+            'methods'             => 'POST',
+            'callback'            => array( $this, 'rest_check_attachments_batch' ),
+            'permission_callback' => function() { return current_user_can( 'upload_files' ); },
+        ) );
+
+        // POST /uwgs-alt-text/v1/attachments/{id} — save alt text for one image.
+        // Body: { alt_text: "…", nonce: "<NONCE_ACTION_id>" }
+        register_rest_route( $namespace, '/attachments/(?P<id>\d+)', array(
+            'methods'             => 'POST',
+            'callback'            => array( $this, 'rest_save_attachment_alt' ),
+            'permission_callback' => function() { return current_user_can( 'upload_files' ); },
+            'args'                => array(
+                'id' => array( 'validate_callback' => function( $v ) { return is_numeric( $v ) && (int) $v > 0; } ),
+            ),
+        ) );
+    }
+
+    public function rest_get_attachment_alt( WP_REST_Request $request ) {
+        $id = absint( $request['id'] );
+        if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+            return new WP_Error( 'invalid_id', __( 'Invalid attachment ID.', 'uwgs-alt-text-tool' ), array( 'status' => 404 ) );
+        }
+        if ( ! current_user_can( 'edit_post', $id ) ) {
+            return new WP_Error( 'forbidden', __( 'You do not have permission to view this attachment.', 'uwgs-alt-text-tool' ), array( 'status' => 403 ) );
+        }
+        $alt = get_post_meta( $id, self::META_KEY, true );
+        return rest_ensure_response( array(
+            'alt'             => $alt,
+            'has_alt'         => ! empty( $alt ),
+            'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
+            'classification'  => $this->uwgs_classify_alt( $alt ),
+            'attachment_id'   => $id,
+        ) );
+    }
+
+    public function rest_check_attachments_batch( WP_REST_Request $request ) {
+        $raw_ids = $request->get_param( 'ids' );
+        if ( ! is_array( $raw_ids ) ) { $raw_ids = array(); }
+        $results = array();
+        foreach ( $raw_ids as $raw_id ) {
+            $id = absint( $raw_id );
+            if ( ! $id || 'attachment' !== get_post_type( $id ) ) { continue; }
+            $alt = get_post_meta( $id, self::META_KEY, true );
+            $results[ (string) $id ] = array(
+                'alt'             => $alt,
+                'has_alt'         => ! empty( $alt ),
+                'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
+                'classification'  => $this->uwgs_classify_alt( $alt ),
+            );
+        }
+        return rest_ensure_response( $results );
+    }
+
+    public function rest_save_attachment_alt( WP_REST_Request $request ) {
+        $id = absint( $request['id'] );
+        if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+            return new WP_Error( 'invalid_id', __( 'Invalid attachment ID.', 'uwgs-alt-text-tool' ), array( 'status' => 404 ) );
+        }
+        if ( ! current_user_can( 'edit_post', $id ) ) {
+            return new WP_Error( 'forbidden', __( 'You do not have permission to edit this attachment.', 'uwgs-alt-text-tool' ), array( 'status' => 403 ) );
+        }
+        // REST saves use their own per-ID nonce identical to the admin-ajax path.
+        $nonce = $request->get_param( 'nonce' );
+        if ( ! $nonce || ! wp_verify_nonce( $nonce, self::NONCE_ACTION . '_' . $id ) ) {
+            return new WP_Error( 'bad_nonce', __( 'Security check failed.', 'uwgs-alt-text-tool' ), array( 'status' => 403 ) );
+        }
+        $mime = get_post_mime_type( $id );
+        if ( strpos( $mime, 'image/' ) !== 0 ) {
+            return new WP_Error( 'not_image', __( 'Attachment is not an image.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
+        }
+        $alt_text = trim( sanitize_text_field( wp_unslash( (string) $request->get_param( 'alt_text' ) ) ) );
+        if ( preg_match( '/^https?:\/\//i', $alt_text ) || preg_match( '/^www\./i', $alt_text ) ) {
+            return new WP_Error( 'url_rejected', __( 'URLs cannot be used as alt text.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
+        }
+        $ext_pattern = '/\.('. implode( '|', UWGS_Alt_Quality::IMAGE_EXTENSIONS ). ')$/i';
+        if ( preg_match( $ext_pattern, $alt_text ) ) {
+            return new WP_Error( 'filename_rejected', __( 'Filenames cannot be used as alt text.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
+        }
+        update_post_meta( $id, self::META_KEY, $alt_text );
+        if ( ! $this->uwgs_alt_needs_attention( $alt_text ) ) {
+            delete_post_meta( $id, self::NEEDS_ALT_KEY );
+        } else {
+            update_post_meta( $id, self::NEEDS_ALT_KEY, '1' );
+        }
+        self::clear_stats_cache();
+        return rest_ensure_response( array(
+            'alt_text'        => $alt_text,
+            'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
+            'classification'  => $this->uwgs_classify_alt( $alt_text ),
+            'message'         => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
+        ) );
+    }
+
+    // =========================================================================
     // DASHBOARD WIDGET
     // =========================================================================
 
@@ -550,6 +780,9 @@ class UWGS_Alt_Text_Tool {
             wp_safe_redirect( remove_query_arg( 'uwgs_refresh_stats' ) );
             exit;
         }
+        // Shared quality utilities module — registered once, enqueued on demand per screen.
+        wp_register_script( 'uwgs-alt-utils', plugins_url( 'js/uwgs-alt-utils.js', __FILE__ ), array(), self::VERSION, true );
+
         if ( 'upload.php' === $hook ) { $this->enqueue_list_view_assets(); }
         if ( 'media-new.php' === $hook ) { $this->enqueue_upload_page_assets(); }
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
@@ -645,7 +878,7 @@ class UWGS_Alt_Text_Tool {
             ),
         );
 
-        wp_register_script( 'uwgs-list-view', plugins_url( 'js/uwgs-list-view.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_register_script( 'uwgs-list-view', plugins_url( 'js/uwgs-list-view.js', __FILE__ ), array( 'jquery', 'uwgs-alt-utils' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-list-view' );
         wp_add_inline_script( 'uwgs-list-view', 'var uwgsAltData = ' . wp_json_encode( $data ) . ';', 'before' );
 
@@ -1008,7 +1241,7 @@ JS;
             'altIsBlank'   => empty( $alt ),
         );
 
-        wp_register_script( 'uwgs-attachment-edit', plugins_url( 'js/uwgs-attachment-edit.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_register_script( 'uwgs-attachment-edit', plugins_url( 'js/uwgs-attachment-edit.js', __FILE__ ), array( 'jquery', 'uwgs-alt-utils' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-attachment-edit' );
         wp_add_inline_script( 'uwgs-attachment-edit', 'var uwgsAttachData = ' . wp_json_encode( $data ) . ';', 'before' );
 
@@ -1194,6 +1427,8 @@ JS;
         $data = array(
             'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
             'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
+            'restUrl'       => rest_url( 'uwgs-alt-text/v1/' ),
+            'restNonce'     => wp_create_nonce( 'wp_rest' ),
             'i18n'          => array(
                 'noticeContent'       => __( '⚠ One or more images in this post are missing alt text. Please add descriptions before publishing.', 'uwgs-alt-text-tool' ),
                 'noticeFeatured'      => __( '⚠ The featured image is missing alt text. Please add a description before publishing.', 'uwgs-alt-text-tool' ),
@@ -1208,7 +1443,7 @@ JS;
             ),
         );
 
-        wp_register_script( 'uwgs-classic-presave', plugins_url( 'js/uwgs-classic-presave.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_register_script( 'uwgs-classic-presave', plugins_url( 'js/uwgs-classic-presave.js', __FILE__ ), array( 'jquery', 'uwgs-alt-utils' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-classic-presave' );
         wp_add_inline_script( 'uwgs-classic-presave', 'var uwgsPresaveData = ' . wp_json_encode( $data ) . ';', 'before' );
 
@@ -1584,17 +1819,37 @@ JS;
 
     public function enqueue_block_editor_assets() {
         if ( ! current_user_can( 'upload_files' ) ) { return; }
-        $i18n = array(
-            'panelTitle'      => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
-            'allGood'         => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
-            'warningContent'  => __( 'One or more images in this post are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
-            'warningFeatured' => __( 'The featured image for this post is missing alt text. Edit the featured image and add a description in the Alt Text field.', 'uwgs-alt-text-tool' ),
-            'warningBoth'     => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
-            'decorativeNote'  => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
-            'canvasBanner'    => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
-            'draftWarning'    => __( 'Some images are missing alt text. You can fix this before publishing.', 'uwgs-alt-text-tool' ),
+
+        $data = array(
+            'restUrl'   => rest_url( 'uwgs-alt-text/v1/' ),
+            'restNonce' => wp_create_nonce( 'wp_rest' ),
+            'i18n'      => array(
+                'panelTitle'      => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
+                'allGood'         => __( '✓ All images in this post have alt text.', 'uwgs-alt-text-tool' ),
+                'warningContent'  => __( 'One or more images in this post are missing alt text. Click each image block and add a description in the Alt Text field in the right sidebar, or mark it as decorative.', 'uwgs-alt-text-tool' ),
+                'warningFeatured' => __( 'The featured image for this post is missing alt text. Edit the featured image and add a description in the Alt Text field.', 'uwgs-alt-text-tool' ),
+                'warningBoth'     => __( 'One or more images and the featured image are missing alt text. Please add descriptions before publishing, or mark decorative images as such.', 'uwgs-alt-text-tool' ),
+                'decorativeNote'  => __( 'If an image is purely decorative, leave alt text empty and check "Mark as decorative" in the block settings sidebar.', 'uwgs-alt-text-tool' ),
+                'canvasBanner'    => __( 'Missing alt text — click this image, then add alt text in the sidebar panel on the right.', 'uwgs-alt-text-tool' ),
+                'draftWarning'    => __( 'Some images are missing alt text. You can fix this before publishing.', 'uwgs-alt-text-tool' ),
+                'sidebarPanelTitle' => __( 'Image Accessibility', 'uwgs-alt-text-tool' ),
+                'sidebarAllGood'    => __( '✓ All images have alt text', 'uwgs-alt-text-tool' ),
+                'sidebarMissing'    => __( '⚠ Images missing alt text', 'uwgs-alt-text-tool' ),
+            ),
         );
-        wp_add_inline_script( 'wp-blocks', 'var uwgsGutenbergI18n = '. wp_json_encode( $i18n ). ';' );
+
+        wp_register_script(
+            'uwgs-block-editor',
+            plugins_url( 'js/uwgs-block-editor.js', __FILE__ ),
+            array( 'wp-edit-post', 'wp-blocks', 'wp-hooks', 'wp-compose', 'wp-data', 'wp-element', 'wp-plugins' ),
+            self::VERSION,
+            true
+        );
+        wp_enqueue_script( 'uwgs-block-editor' );
+        wp_add_inline_script( 'uwgs-block-editor', 'var uwgsBlockEditorData = ' . wp_json_encode( $data ) . ';', 'before' );
+
+        // Legacy heredoc kept as an unused variable — content is now served from
+        // js/uwgs-block-editor.js. Remove this block once JS file is confirmed stable.
         $js = <<<'JS'
 ( function( wp, i18n ) {
     'use strict';
@@ -1700,7 +1955,7 @@ JS;
     registerPlugin( 'uwgs-alt-text-tool', { render: UWGSAltTextPanel } );
 } )( window.wp, ( typeof uwgsGutenbergI18n !== 'undefined' ? uwgsGutenbergI18n : {} ) );
 JS;
-        wp_add_inline_script( 'wp-edit-post', $js, 'after' );
+        // $js is retained as reference only — do not re-inject. uwgs-block-editor.js is the active file.
     }
 
     // =========================================================================
@@ -1754,6 +2009,17 @@ JS;
 
     public function render_settings_page() {
         if ( ! current_user_can( 'manage_options' ) ) { return; }
+        $rules = UWGS_Alt_Quality::get_rules_description();
+        $outcome_colors = array(
+            'needs_attention' => '#c62828',
+            'weak'            => '#856404',
+            'good'            => '#2e7d32',
+        );
+        $outcome_labels = array(
+            'needs_attention' => __( 'Needs attention', 'uwgs-alt-text-tool' ),
+            'weak'            => __( 'Weak quality', 'uwgs-alt-text-tool' ),
+            'good'            => __( 'Good quality', 'uwgs-alt-text-tool' ),
+        );
         ?>
         <div class="wrap">
             <h1><?php esc_html_e( 'Alt Text Tool Settings', 'uwgs-alt-text-tool' ); ?></h1>
@@ -1764,6 +2030,34 @@ JS;
                 submit_button();
                 ?>
             </form>
+
+            <hr>
+            <h2><?php esc_html_e( 'How Alt Text Quality Is Evaluated', 'uwgs-alt-text-tool' ); ?></h2>
+            <p><?php esc_html_e( 'The following rules are applied to every image\'s alt text. Rules are checked in order; the first matching rule determines the outcome.', 'uwgs-alt-text-tool' ); ?></p>
+            <table class="widefat striped" style="max-width:800px;">
+                <thead>
+                    <tr>
+                        <th><?php esc_html_e( 'Rule', 'uwgs-alt-text-tool' ); ?></th>
+                        <th><?php esc_html_e( 'Description', 'uwgs-alt-text-tool' ); ?></th>
+                        <th><?php esc_html_e( 'Outcome', 'uwgs-alt-text-tool' ); ?></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ( $rules as $rule ) :
+                        $color = isset( $outcome_colors[ $rule['outcome'] ] ) ? $outcome_colors[ $rule['outcome'] ] : '#555';
+                        $label = isset( $outcome_labels[ $rule['outcome'] ] ) ? $outcome_labels[ $rule['outcome'] ] : esc_html( $rule['outcome'] );
+                    ?>
+                    <tr>
+                        <td style="font-weight:600;white-space:nowrap;"><?php echo esc_html( $rule['label'] ); ?></td>
+                        <td><?php echo esc_html( $rule['description'] ); ?></td>
+                        <td style="color:<?php echo esc_attr( $color ); ?>;font-weight:600;white-space:nowrap;"><?php echo esc_html( $label ); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+            <p class="description" style="max-width:800px;margin-top:8px;">
+                <?php esc_html_e( 'These rules are enforced in both PHP (server-side save and the media library) and JavaScript (inline editing and pre-save warnings). If you need to adjust a rule, update both js/uwgs-alt-utils.js and the UWGS_Alt_Quality class in the plugin file.', 'uwgs-alt-text-tool' ); ?>
+            </p>
         </div>
         <?php
     }
@@ -1811,6 +2105,8 @@ JS;
         $data = array(
             'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
             'altCheckNonce' => wp_create_nonce( self::NONCE_ALT_CHECK ),
+            'restUrl'       => rest_url( 'uwgs-alt-text/v1/' ),
+            'restNonce'     => wp_create_nonce( 'wp_rest' ),
             'i18n'          => array(
                 'warningTitle'        => __( '⚠ Accessibility: Images missing alt text', 'uwgs-alt-text-tool' ),
                 'warningBodyContent'  => __( 'One or more images in this post are missing alt text. Please go back and add descriptions, or click "Save anyway" if all images are decorative.', 'uwgs-alt-text-tool' ),
@@ -1821,7 +2117,7 @@ JS;
             ),
         );
 
-        wp_register_script( 'uwgs-stories', plugins_url( 'js/uwgs-stories.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_register_script( 'uwgs-stories', plugins_url( 'js/uwgs-stories.js', __FILE__ ), array( 'jquery', 'uwgs-alt-utils' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-stories' );
         wp_add_inline_script( 'uwgs-stories', 'var uwgsStoriesData = ' . wp_json_encode( $data ) . ';', 'before' );
 

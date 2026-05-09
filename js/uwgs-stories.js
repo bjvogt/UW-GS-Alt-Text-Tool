@@ -43,6 +43,15 @@
     var nonce   = data.altCheckNonce  || '';
     var i18n    = data.i18n           || {};
 
+    // Options object passed to UWGSAltUtils.rest.checkBatch — built once, reused.
+    // REST is tried first; admin-ajax is the fallback. See uwgs-alt-utils.js.
+    var checkOpts = {
+        restUrl:   data.restUrl   || '',
+        restNonce: data.restNonce || '',
+        ajaxUrl:   ajaxUrl,
+        ajaxNonce: nonce,
+    };
+
     // One-shot flag: consumed the moment the re-click is handled, so the very
     // next user-initiated click always re-runs the alt-text scan.
     var bypassOnce = false;
@@ -163,22 +172,12 @@
         return ids.filter( function( v, i, a ) { return a.indexOf( v ) === i; } );
     }
 
+    // Batch check via UWGSAltUtils.rest.checkBatch — REST first, admin-ajax fallback.
+    // Replaces the former per-image loop of individual uwgs_get_attachment_alt calls.
     function checkAcfImagesMissingAlt( ids, callback ) {
-        if ( ! ids.length ) { callback( false ); return; }
-        var fd = new FormData();
-        fd.append( 'action', 'uwgs_check_attachments_alt_batch' );
-        fd.append( 'nonce', nonce );
-        ids.forEach( function( id ) { fd.append( 'ids[]', id ); } );
-        fetch( ajaxUrl, { method: 'POST', body: fd } )
-            .then( function( r ) { return r.json(); } )
-            .then( function( resp ) {
-                if ( ! resp.success ) { callback( false ); return; }
-                var missing = Object.keys( resp.data ).some( function( k ) {
-                    return resp.data[ k ] && resp.data[ k ].needs_attention;
-                } );
-                callback( missing );
-            } )
-            .catch( function() { callback( false ); } );
+        window.UWGSAltUtils.rest.checkBatch( ids, checkOpts, function( missing ) {
+            callback( missing );
+        } );
     }
 
     // -------------------------------------------------------------------------
