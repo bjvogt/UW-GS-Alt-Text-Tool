@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.5.7
+ * Version:           2.5.8
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.5.7';
+    const VERSION                = '2.5.8';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -1823,9 +1823,12 @@ JS;
             .text( i18n.saveAnyway || 'Save anyway' )
             .on( 'click', function() {
                 hideWarning();
-                // Re-click the original button with a one-shot bypass so ACF's
-                // full save flow runs normally (nonces, field serialisation,
-                // TinyMCE sync, featured image — everything).
+                // Use requestSubmit so ACF's full save flow runs normally from
+                // this async context. Fall back to click() for old browsers.
+                var form = document.getElementById( 'post' );
+                if ( form && typeof form.requestSubmit === 'function' && capturedBtn ) {
+                    try { form.requestSubmit( capturedBtn ); return; } catch ( err ) {}
+                }
                 bypassOnce = true;
                 if ( capturedBtn ) { capturedBtn.click(); }
             } );
@@ -1957,11 +1960,14 @@ JS;
                 if ( hasContent || hasFeatured ) {
                     showWarning( hasContent, hasFeatured );
                 } else {
-                    // Clean scan: one-shot bypass then re-click so ACF handles the save.
+                    // Clean scan: use requestSubmit so ACF's full save flow runs
+                    // reliably from this async context. Fall back to click().
+                    var form = document.getElementById( 'post' );
+                    if ( form && typeof form.requestSubmit === 'function' && capturedBtn ) {
+                        try { form.requestSubmit( capturedBtn ); return; } catch ( err ) {}
+                    }
                     bypassOnce = true;
-                    capturedBtn.click();
-                    // bypassOnce is reset at the top of this listener on the re-click,
-                    // before any of our other checks run.
+                    if ( capturedBtn ) { capturedBtn.click(); }
                 }
             } );
         }, true ); // capture phase
