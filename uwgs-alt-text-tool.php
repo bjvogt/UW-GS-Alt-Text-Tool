@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.6.0
+ * Version:           2.7.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -32,7 +32,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.6.0';
+    const VERSION                = '2.7.0';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -60,7 +60,8 @@ class UWGS_Alt_Text_Tool {
         add_action( 'admin_enqueue_scripts',           array( $this, 'enqueue_admin_assets' ) );
         add_action( 'wp_ajax_uwgs_save_alt_text',      array( $this, 'ajax_save_alt_text' ) );
         add_action( 'wp_ajax_uwgs_bulk_save_alt_text', array( $this, 'ajax_bulk_save_alt_text' ) );
-        add_action( 'wp_ajax_uwgs_get_attachment_alt', array( $this, 'ajax_get_attachment_alt' ) );
+        add_action( 'wp_ajax_uwgs_get_attachment_alt',           array( $this, 'ajax_get_attachment_alt' ) );
+        add_action( 'wp_ajax_uwgs_check_attachments_alt_batch',   array( $this, 'ajax_check_attachments_alt_batch' ) );
         add_action( 'add_attachment',                  array( $this, 'flag_new_upload' ) );
         add_action( 'edit_attachment',                 array( $this, 'server_copy_caption_to_alt' ) );
         add_action( 'wp_dashboard_setup',              array( $this, 'register_dashboard_widget' ) );
@@ -432,6 +433,32 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
+    // AJAX: CHECK MULTIPLE ATTACHMENTS ALT TEXT (BATCH)
+    // =========================================================================
+
+    public function ajax_check_attachments_alt_batch() {
+        if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( $_POST['nonce'], self::NONCE_ALT_CHECK ) ) {
+            wp_send_json_error( 'Security check failed.' );
+        }
+        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Insufficient permissions.' ); }
+        $raw_ids = isset( $_POST['ids'] ) ? (array) $_POST['ids'] : array();
+        $results = array();
+        foreach ( $raw_ids as $raw_id ) {
+            $id = absint( $raw_id );
+            if ( ! $id ) { continue; }
+            if ( 'attachment' !== get_post_type( $id ) ) { continue; }
+            $alt = get_post_meta( $id, self::META_KEY, true );
+            $results[ (string) $id ] = array(
+                'alt'             => $alt,
+                'has_alt'         => ! empty( $alt ),
+                'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
+                'classification'  => $this->uwgs_classify_alt( $alt ),
+            );
+        }
+        wp_send_json_success( $results );
+    }
+
+    // =========================================================================
     // DASHBOARD WIDGET
     // =========================================================================
 
@@ -558,8 +585,9 @@ class UWGS_Alt_Text_Tool {
                 border-radius:3px; padding:1px 5px; vertical-align:middle;
             }
             .uwgs-alt-editor textarea { font-size:13px; font-family:inherit; }
-            .uwgs-alt-feedback.success { color:#2e7d32; }
-            .uwgs-alt-feedback.error   { color:#c62828; }
+            .uwgs-alt-feedback.success  { color:#2e7d32; }
+            .uwgs-alt-feedback.warning  { color:#856404; }
+            .uwgs-alt-feedback.error    { color:#c62828; }
             /* Info bar (settings-driven instructions) */
             #uwgs-info-bar {
                 padding:10px 14px;
@@ -617,7 +645,9 @@ class UWGS_Alt_Text_Tool {
             ),
         );
 
-        wp_add_inline_script( 'jquery', 'var uwgsAltData = '. wp_json_encode( $data ). ';' );
+        wp_register_script( 'uwgs-list-view', plugins_url( 'js/uwgs-list-view.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-list-view' );
+        wp_add_inline_script( 'uwgs-list-view', 'var uwgsAltData = ' . wp_json_encode( $data ) . ';', 'before' );
 
         $js = <<<'JS'
 jQuery( function( $ ) {
@@ -871,7 +901,6 @@ jQuery( function( $ ) {
 } );
 JS;
 
-        wp_add_inline_script( 'jquery', $js );
     }
 
     // =========================================================================
@@ -880,7 +909,9 @@ JS;
 
     private function enqueue_upload_page_assets() {
         $i18n = array( 'editPrompt' => __( 'Upload complete — click here to edit and add alt text', 'uwgs-alt-text-tool' ) );
-        wp_add_inline_script( 'jquery', 'var uwgsUploadI18n = '. wp_json_encode( $i18n ). ';' );
+        wp_register_script( 'uwgs-upload-page', plugins_url( 'js/uwgs-upload-page.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-upload-page' );
+        wp_add_inline_script( 'uwgs-upload-page', 'var uwgsUploadI18n = ' . wp_json_encode( $i18n ) . ';', 'before' );
         $js = <<<'JS'
 ( function() {
     'use strict';
@@ -916,7 +947,6 @@ JS;
     else { observeUploadList(); }
 } )();
 JS;
-        wp_add_inline_script( 'jquery', $js, 'after' );
     }
 
     // =========================================================================
@@ -978,7 +1008,9 @@ JS;
             'altIsBlank'   => empty( $alt ),
         );
 
-        wp_add_inline_script( 'jquery', 'var uwgsAttachData = '. wp_json_encode( $data ). ';' );
+        wp_register_script( 'uwgs-attachment-edit', plugins_url( 'js/uwgs-attachment-edit.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-attachment-edit' );
+        wp_add_inline_script( 'uwgs-attachment-edit', 'var uwgsAttachData = ' . wp_json_encode( $data ) . ';', 'before' );
 
         $js = <<<'JS'
 jQuery( function( $ ) {
@@ -1119,7 +1151,6 @@ jQuery( function( $ ) {
 } );
 JS;
 
-        wp_add_inline_script( 'jquery', $js );
     }
 
     // =========================================================================
@@ -1177,7 +1208,9 @@ JS;
             ),
         );
 
-        wp_add_inline_script( 'jquery', 'var uwgsPresaveData = '. wp_json_encode( $data ). ';' );
+        wp_register_script( 'uwgs-classic-presave', plugins_url( 'js/uwgs-classic-presave.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-classic-presave' );
+        wp_add_inline_script( 'uwgs-classic-presave', 'var uwgsPresaveData = ' . wp_json_encode( $data ) . ';', 'before' );
 
         $js = <<<'JS'
 ( function() {
@@ -1469,7 +1502,6 @@ JS;
 } )();
 JS;
 
-        wp_add_inline_script( 'jquery', $js, 'after' );
     }
 
     // =========================================================================
@@ -1478,7 +1510,9 @@ JS;
 
     private function enqueue_media_modal_caption_assets() {
         $i18n = array( 'captionCopied' => __( 'Copied from caption — please review before inserting.', 'uwgs-alt-text-tool' ) );
-        wp_add_inline_script( 'jquery', 'var uwgsModalCapI18n = '. wp_json_encode( $i18n ). ';' );
+        wp_register_script( 'uwgs-media-modal', plugins_url( 'js/uwgs-media-modal.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-media-modal' );
+        wp_add_inline_script( 'uwgs-media-modal', 'var uwgsModalCapI18n = ' . wp_json_encode( $i18n ) . ';', 'before' );
         $js = <<<'JS'
 ( function() {
     'use strict';
@@ -1542,7 +1576,6 @@ JS;
     else { observeForModal(); }
 } )();
 JS;
-        wp_add_inline_script( 'jquery', $js, 'after' );
     }
 
     // =========================================================================
@@ -1746,8 +1779,8 @@ JS;
     //
     // We scan:
     //   - All TinyMCE instances for <img> tags without alt text
-    //   - All ACF image fields for missing alt text (via AJAX to the existing
-    //     uwgs_get_attachment_alt endpoint)
+    //   - All ACF image fields for missing alt text (via AJAX batch endpoint
+    //     uwgs_check_attachments_alt_batch)
     // =========================================================================
 
     public function enqueue_uw_stories_assets( $hook ) {
@@ -1788,7 +1821,9 @@ JS;
             ),
         );
 
-        wp_add_inline_script( 'jquery', 'var uwgsStoriesData = ' . wp_json_encode( $data ) . ';' );
+        wp_register_script( 'uwgs-stories', plugins_url( 'js/uwgs-stories.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-stories' );
+        wp_add_inline_script( 'uwgs-stories', 'var uwgsStoriesData = ' . wp_json_encode( $data ) . ';', 'before' );
 
         $js = <<<'JS'
 ( function( $ ) {
@@ -2058,7 +2093,6 @@ JS;
 } )( jQuery );
 JS;
 
-        wp_add_inline_script( 'jquery', $js, 'after' );
     }
 }
 
