@@ -78,19 +78,20 @@
         var $altInput = $altSetting.find( 'textarea, input' ).first();
         if ( ! $altInput.length ) { return; }
 
-        // Inline warning banner
+        // Warning banner — inserted directly after the alt textarea, matching the
+        // classic-editor yellow-bar style (.uwgs-attachment-blank-notice equivalent).
         var warnMsg = ( alt === '' )
             ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
             : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
 
-        var $warning = $( '<p>' )
+        var $warning = $( '<div>' )
             .addClass( 'uwgs-details-warning' )
             .attr( 'role', 'alert' )
-            .text( warnMsg );
+            .text( '⚠ ' + warnMsg );
 
-        $altSetting.append( $warning );
+        $altInput.after( $warning );
 
-        // "Use suggestion" button — only when alt is blank and a suggestion exists
+        // “Use suggestion” button — only when alt is blank and a suggestion exists
         if ( alt === '' ) {
             var suggestion = getSuggestion( view.model );
             if ( suggestion ) {
@@ -98,7 +99,7 @@
                     ? ( i18n.useSuggestionCaption  || 'Use caption as alt text' )
                     : ( i18n.useSuggestionFilename || 'Use filename as alt text' );
 
-                var $btn = $( '<button type="button" class="button button-small uwgs-details-suggestion">' )
+                var $btn = $( '<button type=”button” class=”button button-small uwgs-details-suggestion”>' )
                     .text( label + ': “' + suggestion.text + '”' );
 
                 $btn.on( 'click', function() {
@@ -106,13 +107,13 @@
                     // Synthetic 'change' triggers WP's updateSetting → model sync → auto-save on blur.
                     $altInput.trigger( 'change' );
                     $btn.remove();
-                    $warning.text( i18n.suggestionApplied || 'Suggestion applied — click elsewhere to save.' );
+                    $warning.text( '⚠ ' + ( i18n.suggestionApplied || 'Suggestion applied — click elsewhere to save.' ) );
                 } );
 
                 // Clear warning when user starts typing independently
                 $altInput.one( 'input', function() { $warning.remove(); $btn.remove(); } );
 
-                $altSetting.append( $btn );
+                $warning.after( $btn );
             }
         }
     }

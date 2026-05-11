@@ -29,6 +29,10 @@ window.UWGSAltUtils = ( function() {
         var s = raw;
         s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
         s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
+        // Split CamelCase: "ThreeMinuteThesis" → "Three Minute Thesis",
+        // "GSEERoom" → "GSEE Room" (acronym boundary handled by second pass).
+        s = s.replace( /([a-z])([A-Z])/g, '$1 $2' );
+        s = s.replace( /([A-Z]+)([A-Z][a-z])/g, '$1 $2' );
         s = s.replace( /[-_]+/g, ' ' );
         s = s.replace( /\b\d+x\d+\b/gi, '' );
         s = s.replace( /\b(19|20)\d{6}\b/g, '' );

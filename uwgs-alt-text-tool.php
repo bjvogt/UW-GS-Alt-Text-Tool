@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.9.2
+ * Version:           2.9.3
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -164,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.9.2';
+    const VERSION                = '2.9.3';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -923,6 +923,30 @@ class UWGS_Alt_Text_Tool {
                 'addAlt'               => __( 'Add alt text', 'uwgs-alt-text-tool' ),
             ),
         );
+
+        $css = '
+            /* Warning banner — matches .uwgs-attachment-blank-notice style from classic editor */
+            .uwgs-details-warning {
+                margin: 6px 0 4px;
+                padding: 8px 10px;
+                background: #fff3cd;
+                border-left: 4px solid #ffc107;
+                color: #856404;
+                font-size: 12px;
+                line-height: 1.5;
+                border-radius: 0 3px 3px 0;
+            }
+            .uwgs-details-suggestion {
+                display: block;
+                margin-top: 4px;
+                white-space: normal;
+                text-align: left;
+            }
+        ';
+
+        wp_register_style( 'uwgs-attachment-details', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-attachment-details' );
+        wp_add_inline_style( 'uwgs-attachment-details', $css );
 
         wp_register_script( 'uwgs-attachment-details', plugins_url( 'js/uwgs-attachment-details.js', __FILE__ ), array( 'uwgs-alt-utils', 'media-views' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-attachment-details' );
