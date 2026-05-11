@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.8.0
+ * Version:           2.9.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -164,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.8.0';
+    const VERSION                = '2.9.0';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -204,6 +204,8 @@ class UWGS_Alt_Text_Tool {
         // uw_stories ACF-based save warning (hooked via admin_enqueue_scripts)
         add_action( 'admin_enqueue_scripts',           array( $this, 'enqueue_uw_stories_assets' ) );
         add_action( 'rest_api_init',                   array( $this, 'register_rest_routes' ) );
+        add_action( 'load-upload.php',                 array( $this, 'redirect_alt_sort_to_images' ) );
+        add_filter( 'wp_prepare_attachment_for_js',    array( $this, 'add_alt_status_to_attachment_js' ), 10, 2 );
     }
 
     // =========================================================================
@@ -689,6 +691,31 @@ class UWGS_Alt_Text_Tool {
     }
 
     // =========================================================================
+    // MEDIA LIBRARY: SORT REDIRECT + GRID OVERLAY HELPERS
+    // =========================================================================
+
+    // When the user sorts by the Alt Text column, redirect to include
+    // post_mime_type=image so the "Images" tab highlights and non-image media
+    // is absent. Fires on load-upload.php before the query runs.
+    public function redirect_alt_sort_to_images() {
+        if ( ! isset( $_GET['orderby'] ) || 'uwgs_alt_text' !== sanitize_key( $_GET['orderby'] ) ) { return; }
+        if ( isset( $_GET['post_mime_type'] ) && 'image' === sanitize_key( $_GET['post_mime_type'] ) ) { return; }
+        wp_safe_redirect( add_query_arg( 'post_mime_type', 'image' ) );
+        exit;
+    }
+
+    // Attach alt quality data to the attachment JSON used by the media grid.
+    // Only adds fields for image attachments; extra fields are ignored in other
+    // contexts (the CSS overlay is only injected on upload.php).
+    public function add_alt_status_to_attachment_js( $response, $attachment ) {
+        if ( ( $response['type'] ?? '' ) !== 'image' ) { return $response; }
+        $alt = get_post_meta( $attachment->ID, self::META_KEY, true );
+        $response['uwgsNeedsAttention'] = $this->uwgs_alt_needs_attention( $alt );
+        $response['uwgsClassification'] = $this->uwgs_classify_alt( $alt );
+        return $response;
+    }
+
+    // =========================================================================
     // DASHBOARD WIDGET
     // =========================================================================
 
@@ -783,7 +810,7 @@ class UWGS_Alt_Text_Tool {
         // Shared quality utilities module — registered once, enqueued on demand per screen.
         wp_register_script( 'uwgs-alt-utils', plugins_url( 'js/uwgs-alt-utils.js', __FILE__ ), array(), self::VERSION, true );
 
-        if ( 'upload.php' === $hook ) { $this->enqueue_list_view_assets(); }
+        if ( 'upload.php' === $hook ) { $this->enqueue_list_view_assets(); $this->enqueue_media_grid_assets(); }
         if ( 'media-new.php' === $hook ) { $this->enqueue_upload_page_assets(); }
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
             global $post;
@@ -799,6 +826,45 @@ class UWGS_Alt_Text_Tool {
             if ( ! did_action( 'wp_enqueue_media' ) ) { wp_enqueue_media(); }
             $this->enqueue_media_modal_caption_assets();
         }
+    }
+
+    // =========================================================================
+    // MEDIA GRID ASSETS (upload.php grid mode — overlay on missing/weak alt)
+    // =========================================================================
+
+    private function enqueue_media_grid_assets() {
+        $data = array(
+            'i18n' => array(
+                'missingAlt' => __( 'Please provide alt text',   'uwgs-alt-text-tool' ),
+                'weakAlt'    => __( 'Alt text needs refinement', 'uwgs-alt-text-tool' ),
+            ),
+        );
+
+        wp_register_script( 'uwgs-media-grid', plugins_url( 'js/uwgs-media-grid.js', __FILE__ ), array( 'media-views' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-media-grid' );
+        wp_add_inline_script( 'uwgs-media-grid', 'var uwgsMediaGridData = ' . wp_json_encode( $data ) . ';', 'before' );
+
+        // Overlay bar along the bottom of grid tiles — mirrors the WP PDF filename label style.
+        $css = '
+            .attachments-browser .attachment.uwgs-alt-missing .thumbnail::after,
+            .attachments-browser .attachment.uwgs-alt-weak    .thumbnail::after {
+                content: attr(data-uwgs-label);
+                position: absolute; bottom:0; left:0; right:0;
+                padding:4px 6px; font-size:11px; line-height:1.4;
+                text-align:center; color:#fff; pointer-events:none;
+                z-index:1;
+            }
+            .attachments-browser .attachment.uwgs-alt-missing .thumbnail::after {
+                background:rgba(198,40,40,0.82);
+            }
+            .attachments-browser .attachment.uwgs-alt-weak .thumbnail::after {
+                background:rgba(133,100,4,0.82);
+            }
+        ';
+
+        wp_register_style( 'uwgs-media-grid', false, array(), self::VERSION );
+        wp_enqueue_style( 'uwgs-media-grid' );
+        wp_add_inline_style( 'uwgs-media-grid', $css );
     }
 
     // =========================================================================
@@ -823,6 +889,7 @@ class UWGS_Alt_Text_Tool {
             .uwgs-alt-feedback.error    { color:#c62828; }
             /* Info bar (settings-driven instructions) */
             #uwgs-info-bar {
+                display:flex; align-items:flex-start; gap:8px;
                 padding:10px 14px;
                 margin:8px 0;
                 background:#f0f6fc;
@@ -832,6 +899,14 @@ class UWGS_Alt_Text_Tool {
                 color:#1d2327;
                 line-height:1.6;
             }
+            .uwgs-info-bar-toggle {
+                background:none; border:none; cursor:pointer;
+                color:#1d2327; font-size:11px; padding:0;
+                flex-shrink:0; line-height:1.8; margin-top:1px;
+            }
+            .uwgs-info-bar-toggle:focus-visible { outline:2px solid #0073aa; outline-offset:2px; }
+            #uwgs-info-bar .uwgs-info-bar-content { flex:1; }
+            #uwgs-info-bar.collapsed .uwgs-info-bar-content { display:none; }
             .uwgs-alt-wrap button:focus-visible,
             .uwgs-alt-wrap textarea:focus-visible { outline:2px solid #0073aa; outline-offset:2px; }
         ';
@@ -863,10 +938,11 @@ class UWGS_Alt_Text_Tool {
         $instructions = get_option( self::OPTION_INSTRUCTIONS, '' );
 
         $data = array(
-            'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
-            'suggestions'  => $suggestions,
-            'instructions' => wp_kses_post( $instructions ),
-            'i18n'         => array(
+            'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
+            'suggestions'   => $suggestions,
+            'instructions'  => wp_kses_post( $instructions ),
+            'columnVisible' => ! in_array( 'uwgs_alt_text', get_hidden_columns( 'upload' ), true ),
+            'i18n'          => array(
                 'emptyBlocked'     => __( 'Please enter a description before saving.', 'uwgs-alt-text-tool' ),
                 'urlRejected'      => __( 'URLs cannot be used as alt text.', 'uwgs-alt-text-tool' ),
                 'filenameRejected' => __( 'Filenames cannot be used as alt text.', 'uwgs-alt-text-tool' ),

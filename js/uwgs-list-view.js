@@ -1,10 +1,11 @@
 jQuery( function( $ ) {
 
-    var data         = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
-    var ajaxUrl      = data.ajaxUrl     || '';
-    var suggestions  = data.suggestions || {};
-    var instructions = data.instructions || '';
-    var i18n         = data.i18n        || {};
+    var data          = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
+    var ajaxUrl       = data.ajaxUrl       || '';
+    var suggestions   = data.suggestions   || {};
+    var instructions  = data.instructions  || '';
+    var columnVisible = data.columnVisible !== false; // defaults true if not provided
+    var i18n          = data.i18n          || {};
 
     // Quality functions and suggestion classification delegated to UWGSAltUtils
     // (uwgs-alt-utils.js), which is the canonical source for all scoring logic.
@@ -22,10 +23,30 @@ jQuery( function( $ ) {
 
     // -------------------------------------------------------------------------
     // Info bar — settings-driven instructions message
+    // Hidden when the Alt Text column is toggled off via Screen Options.
+    // Collapsible; collapsed state persisted in localStorage.
     // -------------------------------------------------------------------------
 
-    if ( instructions ) {
-        var $bar = $( '<div id="uwgs-info-bar">' ).html( instructions );
+    if ( instructions && columnVisible ) {
+        var storageKey  = 'uwgs_info_bar_collapsed';
+        var isCollapsed = localStorage.getItem( storageKey ) === '1';
+
+        var $toggle = $( '<button type="button" class="uwgs-info-bar-toggle">' )
+            .attr( { 'aria-label': i18n.toggleInstructions || 'Toggle instructions', 'aria-expanded': isCollapsed ? 'false' : 'true' } )
+            .html( isCollapsed ? '&#9660;' : '&#9650;' );
+
+        var $content = $( '<span class="uwgs-info-bar-content">' ).html( instructions );
+        var $bar     = $( '<div id="uwgs-info-bar">' ).append( $toggle ).append( $content );
+        if ( isCollapsed ) { $bar.addClass( 'collapsed' ); }
+
+        $toggle.on( 'click', function() {
+            var nowCollapsed = ! $bar.hasClass( 'collapsed' );
+            $bar.toggleClass( 'collapsed', nowCollapsed );
+            $toggle.html( nowCollapsed ? '&#9660;' : '&#9650;' )
+                   .attr( 'aria-expanded', nowCollapsed ? 'false' : 'true' );
+            localStorage.setItem( storageKey, nowCollapsed ? '1' : '0' );
+        } );
+
         var $tablenav = $( '.tablenav.top' );
         if ( $tablenav.length ) { $tablenav.before( $bar ); }
         else { $( '#wpbody-content .wrap' ).prepend( $bar ); }
