@@ -84,7 +84,12 @@
 
         // Measure the textarea's left offset within .settings so the warning and
         // help text align exactly with the textarea column, regardless of label width.
-        var inputLeft = Math.round( $altInput.offset().left - $settings.offset().left );
+        // Guard against offset() returning undefined when view is not yet in the DOM.
+        var settingsOff = $settings.offset();
+        var inputOff    = $altInput.offset();
+        var inputLeft   = ( settingsOff && inputOff )
+            ? Math.round( inputOff.left - settingsOff.left )
+            : 0;
 
         var warnMsg = ( alt === '' )
             ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
