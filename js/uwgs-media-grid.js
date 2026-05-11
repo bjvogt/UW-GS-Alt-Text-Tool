@@ -29,18 +29,20 @@
 
             var needsAttention = this.model.get( 'uwgsNeedsAttention' );
             var classification = this.model.get( 'uwgsClassification' ) || 'invalid';
-            var $thumbnail     = this.$el.find( '.thumbnail' );
+            // Target .attachment-preview (position:relative, overflow:visible) so the
+            // ::after badge is not clipped by .thumbnail's overflow:hidden.
+            var $preview = this.$el.find( '.attachment-preview' );
 
             this.$el.removeClass( 'uwgs-alt-missing uwgs-alt-weak' );
-            $thumbnail.removeAttr( 'data-uwgs-label' );
+            $preview.removeAttr( 'data-uwgs-label' );
 
             if ( needsAttention ) {
                 if ( classification === 'weak' ) {
                     this.$el.addClass( 'uwgs-alt-weak' );
-                    $thumbnail.attr( 'data-uwgs-label', i18n.weakAlt || 'Alt text needs refinement' );
+                    $preview.attr( 'data-uwgs-label', i18n.weakAlt || 'Alt text needs refinement' );
                 } else {
                     this.$el.addClass( 'uwgs-alt-missing' );
-                    $thumbnail.attr( 'data-uwgs-label', i18n.missingAlt || 'Please provide alt text' );
+                    $preview.attr( 'data-uwgs-label', i18n.missingAlt || 'Please provide alt text' );
                 }
             }
 

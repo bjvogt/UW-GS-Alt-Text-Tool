@@ -883,15 +883,18 @@ class UWGS_Alt_Text_Tool {
         wp_add_inline_script( 'uwgs-media-grid', 'var uwgsMediaGridData = ' . wp_json_encode( $data ) . ';', 'before' );
 
         // Overlay badge along the bottom of grid tiles — mirrors the WP PDF filename label style.
+        // Targets .attachment-preview (position:relative, overflow:visible) rather than
+        // .thumbnail (position:absolute, overflow:hidden) so the badge is never clipped.
+        // z-index:10 ensures the badge renders above the absolutely-positioned .thumbnail.
         $css = '
-            .attachments-browser .attachment.uwgs-alt-missing .thumbnail::after,
-            .attachments-browser .attachment.uwgs-alt-weak    .thumbnail::after {
+            .attachments-browser .attachment.uwgs-alt-missing .attachment-preview::after,
+            .attachments-browser .attachment.uwgs-alt-weak    .attachment-preview::after {
                 content: attr(data-uwgs-label);
                 position: absolute; bottom:4px; left:50%; transform:translateX(-50%);
-                white-space:nowrap; max-width:90%;
+                white-space:nowrap;
                 padding:3px 8px; font-size:11px; line-height:1.4; border-radius:3px;
-                text-align:center; color:#fff; background:rgba(0,0,0,0.72);
-                pointer-events:none; z-index:1;
+                text-align:center; color:#fff; background:rgba(0,0,0,0.55);
+                pointer-events:none; z-index:10;
             }
         ';
 
