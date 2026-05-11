@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.9.1
+ * Version:           2.9.2
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -164,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.9.1';
+    const VERSION                = '2.9.2';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -727,6 +727,11 @@ class UWGS_Alt_Text_Tool {
     // is absent. Fires on load-upload.php before the query runs.
     public function redirect_alt_sort_to_images() {
         if ( ! isset( $_GET['orderby'] ) || 'uwgs_alt_text' !== sanitize_key( $_GET['orderby'] ) ) { return; }
+        // Filter form submitted (user clearing or changing filter) — redirect to clean upload.php.
+        if ( isset( $_GET['filter_action'] ) ) {
+            wp_safe_redirect( admin_url( 'upload.php' ) );
+            exit;
+        }
         if ( isset( $_GET['post_mime_type'] ) && 'image' === sanitize_key( $_GET['post_mime_type'] ) ) { return; }
         wp_safe_redirect( add_query_arg( 'post_mime_type', 'image' ) );
         exit;
@@ -838,7 +843,11 @@ class UWGS_Alt_Text_Tool {
         // Shared quality utilities module — registered once, enqueued on demand per screen.
         wp_register_script( 'uwgs-alt-utils', plugins_url( 'js/uwgs-alt-utils.js', __FILE__ ), array(), self::VERSION, true );
 
-        if ( 'upload.php' === $hook ) { $this->enqueue_list_view_assets(); $this->enqueue_media_grid_assets(); }
+        if ( 'upload.php' === $hook ) {
+            $this->enqueue_list_view_assets();
+            $this->enqueue_media_grid_assets();
+            $this->enqueue_attachment_details_assets();
+        }
         if ( 'media-new.php' === $hook ) { $this->enqueue_upload_page_assets(); }
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
             global $post;
@@ -853,6 +862,7 @@ class UWGS_Alt_Text_Tool {
             }
             if ( ! did_action( 'wp_enqueue_media' ) ) { wp_enqueue_media(); }
             $this->enqueue_media_modal_caption_assets();
+            $this->enqueue_attachment_details_assets();
         }
     }
 
@@ -872,27 +882,48 @@ class UWGS_Alt_Text_Tool {
         wp_enqueue_script( 'uwgs-media-grid' );
         wp_add_inline_script( 'uwgs-media-grid', 'var uwgsMediaGridData = ' . wp_json_encode( $data ) . ';', 'before' );
 
-        // Overlay bar along the bottom of grid tiles — mirrors the WP PDF filename label style.
+        // Overlay badge along the bottom of grid tiles — mirrors the WP PDF filename label style.
         $css = '
             .attachments-browser .attachment.uwgs-alt-missing .thumbnail::after,
             .attachments-browser .attachment.uwgs-alt-weak    .thumbnail::after {
                 content: attr(data-uwgs-label);
-                position: absolute; bottom:0; left:0; right:0;
-                padding:4px 6px; font-size:11px; line-height:1.4;
-                text-align:center; color:#fff; pointer-events:none;
-                z-index:1;
-            }
-            .attachments-browser .attachment.uwgs-alt-missing .thumbnail::after {
-                background:rgba(198,40,40,0.82);
-            }
-            .attachments-browser .attachment.uwgs-alt-weak .thumbnail::after {
-                background:rgba(133,100,4,0.82);
+                position: absolute; bottom:4px; left:50%; transform:translateX(-50%);
+                white-space:nowrap; max-width:90%;
+                padding:3px 8px; font-size:11px; line-height:1.4; border-radius:3px;
+                text-align:center; color:#fff; background:rgba(0,0,0,0.72);
+                pointer-events:none; z-index:1;
             }
         ';
 
         wp_register_style( 'uwgs-media-grid', false, array(), self::VERSION );
         wp_enqueue_style( 'uwgs-media-grid' );
         wp_add_inline_style( 'uwgs-media-grid', $css );
+    }
+
+    // =========================================================================
+    // ATTACHMENT DETAILS ASSETS (media modal + upload.php grid details panel)
+    // =========================================================================
+
+    private function enqueue_attachment_details_assets() {
+        $data = array(
+            'i18n' => array(
+                'blankWarning'         => __( 'This image has no alt text. Please add a description.', 'uwgs-alt-text-tool' ),
+                'weakWarning'          => __( 'Alt text may need improvement. Please review the description.', 'uwgs-alt-text-tool' ),
+                'useSuggestionCaption' => __( 'Use caption as alt text', 'uwgs-alt-text-tool' ),
+                'useSuggestionFilename'=> __( 'Use filename as alt text', 'uwgs-alt-text-tool' ),
+                'suggestionApplied'    => __( 'Suggestion applied — click elsewhere to save.', 'uwgs-alt-text-tool' ),
+                'navWarning'           => __( 'This image still has no alt text.', 'uwgs-alt-text-tool' ),
+                'navProceed'           => __( 'Continue anyway', 'uwgs-alt-text-tool' ),
+                'navStay'              => __( 'Add alt text', 'uwgs-alt-text-tool' ),
+                'closeWarning'         => __( 'This image has no alt text.', 'uwgs-alt-text-tool' ),
+                'closeAnyway'          => __( 'Close without alt text', 'uwgs-alt-text-tool' ),
+                'addAlt'               => __( 'Add alt text', 'uwgs-alt-text-tool' ),
+            ),
+        );
+
+        wp_register_script( 'uwgs-attachment-details', plugins_url( 'js/uwgs-attachment-details.js', __FILE__ ), array( 'uwgs-alt-utils', 'media-views' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-attachment-details' );
+        wp_add_inline_script( 'uwgs-attachment-details', 'var uwgsDetailsData = ' . wp_json_encode( $data ) . ';', 'before' );
     }
 
     // =========================================================================

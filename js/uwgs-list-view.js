@@ -24,12 +24,28 @@ jQuery( function( $ ) {
     } );
 
     // -------------------------------------------------------------------------
+    // Bug 1a: Sync the "Media type" dropdown to "Images" when sorted by alt text.
+    // The redirect already enforces post_mime_type=image in the URL, but the
+    // <select> element is rendered from the GET param independently by WP and
+    // does not reflect the redirect-injected value without this nudge.
+    // -------------------------------------------------------------------------
+
+    if ( ( new URLSearchParams( window.location.search ) ).get( 'orderby' ) === 'uwgs_alt_text' ) {
+        var $mimeSelect = $( 'select[name="post_mime_type"]' );
+        if ( $mimeSelect.length && $mimeSelect.val() !== 'image' ) {
+            $mimeSelect.val( 'image' );
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Info bar — settings-driven instructions message
-    // Hidden when the Alt Text column is toggled off via Screen Options.
+    // Visibility tracks the Alt Text column (Screen Options).
+    // Screen Options toggles happen client-side without a page reload, so we
+    // watch the checkbox and update the bar reactively.
     // Collapsible; collapsed state persisted in localStorage.
     // -------------------------------------------------------------------------
 
-    if ( instructions && columnVisible ) {
+    if ( instructions ) {
         var storageKey  = 'uwgs_info_bar_collapsed';
         var isCollapsed = localStorage.getItem( storageKey ) === '1';
 
@@ -40,6 +56,7 @@ jQuery( function( $ ) {
         var $content = $( '<span class="uwgs-info-bar-content">' ).html( instructions );
         var $bar     = $( '<div id="uwgs-info-bar">' ).append( $toggle ).append( $content );
         if ( isCollapsed ) { $bar.addClass( 'collapsed' ); }
+        if ( ! columnVisible ) { $bar.hide(); }
 
         $toggle.on( 'click', function() {
             var nowCollapsed = ! $bar.hasClass( 'collapsed' );
@@ -52,6 +69,11 @@ jQuery( function( $ ) {
         var $tablenav = $( '.tablenav.top' );
         if ( $tablenav.length ) { $tablenav.before( $bar ); }
         else { $( '#wpbody-content .wrap' ).prepend( $bar ); }
+
+        // Reactively show/hide when the user toggles the Alt Text column via Screen Options.
+        $( document ).on( 'change', '#uwgs_alt_text-hide', function() {
+            $bar.toggle( ! this.checked );
+        } );
     }
 
     // -------------------------------------------------------------------------
