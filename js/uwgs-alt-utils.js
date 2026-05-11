@@ -29,6 +29,9 @@ window.UWGSAltUtils = ( function() {
         var s = raw;
         s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
         s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
+        // Strip camera prefix + serial when followed by meaningful content:
+        // "IMG-1603-Sean-Name" → "Sean-Name"; leaves "IMG-1234" alone (no trailing sep).
+        s = s.replace( /^(IMG|DSC|DSCN|MVI|MOV)[_\-\s]+\d+[_\-\s]+/i, '' );
         // Split CamelCase: "ThreeMinuteThesis" → "Three Minute Thesis",
         // "GSEERoom" → "GSEE Room" (acronym boundary handled by second pass).
         s = s.replace( /([a-z])([A-Z])/g, '$1 $2' );
@@ -39,6 +42,8 @@ window.UWGSAltUtils = ( function() {
         s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
         s = s.replace( /\bscaled\b/gi, '' );
         s = s.replace( /\b\d{1,2}\b/g, '' );
+        // Remove trailing standalone sequence numbers (e.g., " 940", " 0007").
+        s = s.replace( /\s+\d+$/, '' );
         s = s.replace( /\s{2,}/g, ' ' ).trim();
         s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
         return s;
@@ -57,9 +62,15 @@ window.UWGSAltUtils = ( function() {
     function _classifyFilenameString( value ) {
         var sanitized = sanitizeFilename( value );
         if ( /^https?:\/\//i.test( value ) || /^www\./i.test( value ) ) { return 'invalid'; }
-        if ( IMAGE_EXTENSIONS.test( value ) || IMAGE_EXTENSIONS.test( sanitized ) ) { return 'invalid'; }
+        // Test only the sanitized form — testing the raw value incorrectly rejects
+        // legitimate filenames just because they carry an image file extension.
+        if ( IMAGE_EXTENSIONS.test( sanitized ) ) { return 'invalid'; }
         if ( sanitized.length < 5 ) { return 'invalid'; }
-        if ( /^(IMG|DSC|DSCN|MVI|MOV|P\d)[_\-\s]/i.test( value ) ) { return 'invalid'; }
+        // Reject if the entire sanitized result is a low-quality generic word.
+        if ( LOW_QUALITY_WORDS.indexOf( sanitized.toLowerCase() ) !== -1 ) { return 'invalid'; }
+        // Test sanitized: camera prefix was stripped in sanitizeFilename when meaningful
+        // content followed, so pure camera names (IMG 1234) still match here.
+        if ( /^(IMG|DSC|DSCN|MVI|MOV|P\d)[_\-\s]/i.test( sanitized ) ) { return 'invalid'; }
         var tokens = sanitized.split( /\s+/ ).filter( function( t ) { return t.length > 0; } );
         var meaningfulWords = tokens.filter( function( t ) {
             if ( t.length <= 1 ) { return false; }
@@ -68,7 +79,9 @@ window.UWGSAltUtils = ( function() {
             return true;
         } );
         if ( meaningfulWords.length === 0 ) { return 'invalid'; }
-        var junkTokens = tokens.filter( function( t ) { return /^\d+$/.test( t ) || ( t.length <= 3 && /^[A-Z0-9]+$/i.test( t ) ); } );
+        // No 'i' flag: after capitalize(), real words are mixed-case (Top, Of) so they
+        // won't match the all-uppercase junk pattern; only acronyms (IMG, HD) will.
+        var junkTokens = tokens.filter( function( t ) { return /^\d+$/.test( t ) || ( t.length <= 3 && /^[A-Z0-9]+$/.test( t ) ); } );
         if ( junkTokens.length > tokens.length / 2 ) { return 'invalid'; }
         if ( meaningfulWords.length === 1 && tokens.length === 1 ) { return 'weak'; }
         return 'good';

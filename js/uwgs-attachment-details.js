@@ -63,12 +63,7 @@
         if ( ! view || ! view.$el || ! view.model ) { return; }
         if ( view.model.get( 'type' ) !== 'image' ) { return; }
 
-        var $altSetting = view.$el.find( '[data-setting=”alt”]' );
-        var $settings   = $altSetting.length ? $altSetting.parent() : null;
-        var $helpP      = $settings ? $settings.find( '#alt-text-description' ) : $();
-
         view.$el.find( '.uwgs-details-warning, .uwgs-details-suggestion' ).remove();
-        $helpP.css( 'margin-left', '' );
 
         var alt = ( view.model.get( 'alt' ) || '' ).trim();
         var needsAttention = ( view.model.get( 'uwgsNeedsAttention' ) !== undefined )
@@ -77,34 +72,25 @@
 
         if ( ! needsAttention ) { return; }
 
+        var $altSetting = view.$el.find( '[data-setting=”alt”]' );
         if ( ! $altSetting.length ) { return; }
 
         var $altInput = $altSetting.find( 'textarea, input' ).first();
         if ( ! $altInput.length ) { return; }
 
-        // Measure the textarea's left offset within .settings so the warning and
-        // help text align exactly with the textarea column, regardless of label width.
-        // Guard against offset() returning undefined when view is not yet in the DOM.
-        var settingsOff = $settings.offset();
-        var inputOff    = $altInput.offset();
-        var inputLeft   = ( settingsOff && inputOff )
-            ? Math.round( inputOff.left - settingsOff.left )
-            : 0;
-
         var warnMsg = ( alt === '' )
             ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
             : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
 
+        // Insert warning inside the .setting span, directly after the textarea.
+        // overflow:hidden creates a block formatting context (BFC) which CSS positions
+        // automatically to the right of the floated label — no JS offset measurement needed.
         var $warning = $( '<div>' )
             .addClass( 'uwgs-details-warning' )
             .attr( 'role', 'alert' )
-            .css( 'margin-left', inputLeft + 'px' )
             .text( '⚠ ' + warnMsg );
 
-        $altSetting.after( $warning );
-
-        // Indent the WP help paragraph to match the textarea column.
-        $helpP.css( 'margin-left', inputLeft + 'px' );
+        $altInput.after( $warning );
 
         // “Use suggestion” button — only when alt is blank and a suggestion exists
         if ( alt === '' ) {
@@ -115,7 +101,6 @@
                     : ( i18n.useSuggestionFilename || 'Use filename as alt text' );
 
                 var $btn = $( '<button type=”button” class=”button button-small uwgs-details-suggestion”>' )
-                    .css( 'margin-left', inputLeft + 'px' )
                     .text( label + ': “' + suggestion.text + '”' );
 
                 $btn.on( 'click', function() {
@@ -127,11 +112,7 @@
                 } );
 
                 // Clear warning when user starts typing independently
-                $altInput.one( 'input', function() {
-                    $warning.remove();
-                    $btn.remove();
-                    $helpP.css( 'margin-left', '' );
-                } );
+                $altInput.one( 'input', function() { $warning.remove(); $btn.remove(); } );
 
                 $warning.after( $btn );
             }

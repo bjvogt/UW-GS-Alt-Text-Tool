@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.9.8
+ * Version:           2.9.9
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -164,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.9.8';
+    const VERSION                = '2.9.9';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -925,14 +925,15 @@ class UWGS_Alt_Text_Tool {
         );
 
         $css = '
-            /* Warning banner — sibling after the alt .setting row.
-               clear:both drops it below the floated label inside .setting.
-               margin-left is set by JS to align exactly with the textarea column. */
+            /* Warning banner — inserted inside .setting after the textarea.
+               overflow:hidden creates a block formatting context (BFC), which CSS
+               positions to the right of the floated label automatically, aligning
+               it exactly with the textarea column without any JS measurement. */
             .uwgs-details-warning {
                 display: block;
-                clear: both;
+                overflow: hidden;
                 box-sizing: border-box;
-                margin: 2px 0 4px;
+                margin: 4px 0 2px;
                 padding: 6px 10px;
                 background: #fff3cd;
                 border-left: 4px solid #ffc107;
@@ -943,10 +944,14 @@ class UWGS_Alt_Text_Tool {
             }
             .uwgs-details-suggestion {
                 display: block;
-                clear: both;
+                overflow: hidden;
                 margin: 2px 0 4px;
                 white-space: normal;
                 text-align: left;
+            }
+            /* Keep the WP help link in the textarea column. */
+            #alt-text-description {
+                margin-left: 30%;
             }
         ';
 
