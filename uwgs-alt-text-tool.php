@@ -926,8 +926,8 @@ class UWGS_Alt_Text_Tool {
 
         $css = '
             /* Warning banner — inserted as a sibling after the alt .setting row.
-               margin-left:30% aligns it with the textarea column, matching the
-               label's min-width:30%, so the banner never bleeds into the label column. */
+               margin-left:30% aligns with the textarea column (matches label min-width:30%)
+               so the banner never bleeds into the label column. */
             .uwgs-details-warning {
                 display: block;
                 box-sizing: border-box;
