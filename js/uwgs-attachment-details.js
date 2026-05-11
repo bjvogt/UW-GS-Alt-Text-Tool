@@ -63,7 +63,12 @@
         if ( ! view || ! view.$el || ! view.model ) { return; }
         if ( view.model.get( 'type' ) !== 'image' ) { return; }
 
+        var $altSetting = view.$el.find( '[data-setting=”alt”]' );
+        var $settings   = $altSetting.length ? $altSetting.parent() : null;
+        var $helpP      = $settings ? $settings.find( '#alt-text-description' ) : $();
+
         view.$el.find( '.uwgs-details-warning, .uwgs-details-suggestion' ).remove();
+        $helpP.css( 'margin-left', '' );
 
         var alt = ( view.model.get( 'alt' ) || '' ).trim();
         var needsAttention = ( view.model.get( 'uwgsNeedsAttention' ) !== undefined )
@@ -72,14 +77,15 @@
 
         if ( ! needsAttention ) { return; }
 
-        var $altSetting = view.$el.find( '[data-setting="alt"]' );
         if ( ! $altSetting.length ) { return; }
 
         var $altInput = $altSetting.find( 'textarea, input' ).first();
         if ( ! $altInput.length ) { return; }
 
-        // Warning banner — inserted directly after the alt textarea, matching the
-        // classic-editor yellow-bar style (.uwgs-attachment-blank-notice equivalent).
+        // Measure the textarea's left offset within .settings so the warning and
+        // help text align exactly with the textarea column, regardless of label width.
+        var inputLeft = Math.round( $altInput.offset().left - $settings.offset().left );
+
         var warnMsg = ( alt === '' )
             ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
             : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
@@ -87,12 +93,13 @@
         var $warning = $( '<div>' )
             .addClass( 'uwgs-details-warning' )
             .attr( 'role', 'alert' )
+            .css( 'margin-left', inputLeft + 'px' )
             .text( '⚠ ' + warnMsg );
 
-        // Insert after the entire .setting row (not inside it) so the warning
-        // appears as a full-width block between the alt row and the help text,
-        // without affecting the label column inside the .setting span.
         $altSetting.after( $warning );
+
+        // Indent the WP help paragraph to match the textarea column.
+        $helpP.css( 'margin-left', inputLeft + 'px' );
 
         // “Use suggestion” button — only when alt is blank and a suggestion exists
         if ( alt === '' ) {
@@ -103,6 +110,7 @@
                     : ( i18n.useSuggestionFilename || 'Use filename as alt text' );
 
                 var $btn = $( '<button type=”button” class=”button button-small uwgs-details-suggestion”>' )
+                    .css( 'margin-left', inputLeft + 'px' )
                     .text( label + ': “' + suggestion.text + '”' );
 
                 $btn.on( 'click', function() {
@@ -114,7 +122,11 @@
                 } );
 
                 // Clear warning when user starts typing independently
-                $altInput.one( 'input', function() { $warning.remove(); $btn.remove(); } );
+                $altInput.one( 'input', function() {
+                    $warning.remove();
+                    $btn.remove();
+                    $helpP.css( 'margin-left', '' );
+                } );
 
                 $warning.after( $btn );
             }
