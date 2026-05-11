@@ -2,6 +2,8 @@ jQuery( function( $ ) {
 
     var data          = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
     var ajaxUrl       = data.ajaxUrl       || '';
+    var restUrl       = data.restUrl       || '';
+    var restNonce     = data.restNonce     || '';
     var suggestions   = data.suggestions   || {};
     var instructions  = data.instructions  || '';
     var columnVisible = data.columnVisible !== false; // defaults true if not provided
@@ -112,6 +114,48 @@ jQuery( function( $ ) {
         }
     } );
 
+    // REST-first save with jQuery.ajax fallback.
+    // Signatures: onSuccess( savedAlt, needsAttention ), onComplete(), onError( msg )
+    function saveAlt( postId, altText, nonce, onSuccess, onComplete, onError ) {
+        onError    = onError    || function() {};
+        onComplete = onComplete || function() {};
+        if ( restUrl && restNonce ) {
+            var usedFallback = false;
+            $.ajax( {
+                url:         restUrl + '/attachments/' + parseInt( postId, 10 ),
+                type:        'POST',
+                contentType: 'application/json',
+                data:        JSON.stringify( { alt_text: altText } ),
+                beforeSend:  function( xhr ) { xhr.setRequestHeader( 'X-WP-Nonce', restNonce ); },
+                success: function( r ) {
+                    onSuccess( r.alt_text || altText, r.needs_attention );
+                },
+                error: function() {
+                    usedFallback = true;
+                    ajaxSave( postId, altText, nonce, onSuccess, onComplete, onError );
+                },
+                complete: function() {
+                    if ( ! usedFallback ) { onComplete(); }
+                }
+            } );
+        } else {
+            ajaxSave( postId, altText, nonce, onSuccess, onComplete, onError );
+        }
+    }
+
+    function ajaxSave( postId, altText, nonce, onSuccess, onComplete, onError ) {
+        $.ajax( {
+            url: ajaxUrl, type: 'POST',
+            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
+            success: function( r ) {
+                if ( r.success ) { onSuccess( r.data.alt_text || altText, r.data.needs_attention ); }
+                else { onError( r.data || i18n.saveFailed || 'Save failed.' ); }
+            },
+            error:    function() { onError( i18n.requestFailed || 'Request failed.' ); },
+            complete: onComplete
+        } );
+    }
+
     // Tab navigation across visible textareas
     function saveAndAdvance( $currentWrap, direction ) {
         var $allInputs = $( '.uwgs-alt-editor .uwgs-alt-input' );
@@ -130,16 +174,14 @@ jQuery( function( $ ) {
             return;
         }
 
-        $.ajax( {
-            url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
-            success: function( r ) {
-                if ( r.success ) { applyColumnSave( $currentWrap, postId, r.data.alt_text || altText, r.data.needs_attention ); }
+        saveAlt( postId, altText, nonce,
+            function( savedAlt, needsAttention ) {
+                applyColumnSave( $currentWrap, postId, savedAlt, needsAttention );
             },
-            complete: function() {
+            function() {
                 if ( $target.length ) { $target.trigger( 'focus' ); }
             }
-        } );
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -166,26 +208,21 @@ jQuery( function( $ ) {
         $spinner.addClass( 'is-active' ).attr( 'aria-hidden', 'true' );
         $fb.text( '' ).removeClass( 'success warning error' );
 
-        $.ajax( {
-            url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
-            success: function( r ) {
-                if ( r.success ) {
-                    applyColumnSave( $wrap, postId, r.data.alt_text || altText, r.data.needs_attention );
-                } else {
-                    $wrap.attr( 'data-uwgs-state', 'invalid' );
-                    $fb.text( '✗ ' + ( r.data || i18n.saveFailed || 'Save failed.' ) ).addClass( 'error' );
-                }
+        saveAlt( postId, altText, nonce,
+            function( savedAlt, needsAttention ) {
+                applyColumnSave( $wrap, postId, savedAlt, needsAttention );
             },
-            error: function() {
+            function() {
+                $btn.prop( 'disabled', false );
+                $spinner.removeClass( 'is-active' ).attr( 'aria-hidden', 'true' );
+            },
+            function( errMsg ) {
                 $wrap.attr( 'data-uwgs-state', 'invalid' );
-                $fb.text( '✗ ' + ( i18n.requestFailed || 'Request failed.' ) ).addClass( 'error' );
-            },
-            complete: function() {
+                $fb.text( '✗ ' + errMsg ).addClass( 'error' );
                 $btn.prop( 'disabled', false );
                 $spinner.removeClass( 'is-active' ).attr( 'aria-hidden', 'true' );
             }
-        } );
+        );
     } );
 
     // -------------------------------------------------------------------------

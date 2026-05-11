@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.9.0
+ * Version:           2.9.1
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -164,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.9.0';
+    const VERSION                = '2.9.1';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -218,6 +218,49 @@ class UWGS_Alt_Text_Tool {
 
     private function uwgs_classify_alt( $alt ) {
         return UWGS_Alt_Quality::classify( $alt );
+    }
+
+    // Returns the standard alt-status array for one attachment ID.
+    // Shared by all four read handlers (AJAX get, AJAX batch, REST get, REST batch).
+    private function get_attachment_alt_data( $id ) {
+        $alt = get_post_meta( $id, self::META_KEY, true );
+        return array(
+            'alt'             => $alt,
+            'has_alt'         => ! empty( $alt ),
+            'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
+            'classification'  => $this->uwgs_classify_alt( $alt ),
+        );
+    }
+
+    // Validates a candidate alt text string.
+    // Returns a translated error string on failure, null on success.
+    private function validate_alt_text_input( $alt_text ) {
+        if ( preg_match( '/^https?:\/\//i', $alt_text ) || preg_match( '/^www\./i', $alt_text ) ) {
+            return __( 'URLs cannot be used as alt text.', 'uwgs-alt-text-tool' );
+        }
+        $ext_pattern = '/\.('. implode( '|', UWGS_Alt_Quality::IMAGE_EXTENSIONS ). ')$/i';
+        if ( preg_match( $ext_pattern, $alt_text ) ) {
+            return __( 'Filenames cannot be used as alt text.', 'uwgs-alt-text-tool' );
+        }
+        return null;
+    }
+
+    // Persists alt text for one image attachment and returns the response data array.
+    // Handles meta update, NEEDS_ALT_KEY flag, and cache invalidation.
+    private function perform_save_alt( $id, $alt_text ) {
+        update_post_meta( $id, self::META_KEY, $alt_text );
+        if ( ! $this->uwgs_alt_needs_attention( $alt_text ) ) {
+            delete_post_meta( $id, self::NEEDS_ALT_KEY );
+        } else {
+            update_post_meta( $id, self::NEEDS_ALT_KEY, '1' );
+        }
+        self::clear_stats_cache();
+        return array(
+            'alt_text'        => $alt_text,
+            'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
+            'classification'  => $this->uwgs_classify_alt( $alt_text ),
+            'message'         => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
+        );
     }
 
     // =========================================================================
@@ -453,28 +496,14 @@ class UWGS_Alt_Text_Tool {
         if ( 'attachment' !== get_post_type( $post_id ) ) {
             wp_send_json_error( __( 'Invalid post type.', 'uwgs-alt-text-tool' ) );
         }
+        $mime = get_post_mime_type( $post_id );
+        if ( strpos( $mime, 'image/' ) !== 0 ) {
+            wp_send_json_error( __( 'Attachment is not an image.', 'uwgs-alt-text-tool' ) );
+        }
         $alt_text = isset( $_POST['alt_text'] ) ? trim( sanitize_text_field( wp_unslash( $_POST['alt_text'] ) ) ) : '';
-        if ( preg_match( '/^https?:\/\//i', $alt_text ) || preg_match( '/^www\./i', $alt_text ) ) {
-            wp_send_json_error( __( 'URLs cannot be used as alt text.', 'uwgs-alt-text-tool' ) );
-        }
-        $ext_pattern = '/\.('. implode( '|', self::IMAGE_EXTENSIONS ). ')$/i';
-        if ( preg_match( $ext_pattern, $alt_text ) ) {
-            wp_send_json_error( __( 'Filenames cannot be used as alt text.', 'uwgs-alt-text-tool' ) );
-        }
-        update_post_meta( $post_id, self::META_KEY, $alt_text );
-        // Only clear the attention flag when the new value passes quality checks;
-        // weak/blank alt text should leave the image flagged for follow-up.
-        if ( ! $this->uwgs_alt_needs_attention( $alt_text ) ) {
-            delete_post_meta( $post_id, self::NEEDS_ALT_KEY );
-        } else {
-            update_post_meta( $post_id, self::NEEDS_ALT_KEY, '1' );
-        }
-        wp_send_json_success( array(
-            'alt_text'        => $alt_text,
-            'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
-            'classification'  => $this->uwgs_classify_alt( $alt_text ),
-            'message'         => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
-        ) );
+        $err = $this->validate_alt_text_input( $alt_text );
+        if ( $err ) { wp_send_json_error( $err ); }
+        wp_send_json_success( $this->perform_save_alt( $post_id, $alt_text ) );
     }
 
     // =========================================================================
@@ -535,14 +564,9 @@ class UWGS_Alt_Text_Tool {
         $attachment_id = isset( $_POST['attachment_id'] ) ? absint( $_POST['attachment_id'] ) : 0;
         if ( ! $attachment_id ) { wp_send_json_error( 'Invalid attachment ID.' ); }
         if ( 'attachment' !== get_post_type( $attachment_id ) ) { wp_send_json_error( 'Not an attachment.' ); }
-        $alt = get_post_meta( $attachment_id, self::META_KEY, true );
-        wp_send_json_success( array(
-            'alt'             => $alt,
-            'has_alt'         => ! empty( $alt ),
-            'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
-            'classification'  => $this->uwgs_classify_alt( $alt ),
-            'attachment_id'   => $attachment_id,
-        ) );
+        $data = $this->get_attachment_alt_data( $attachment_id );
+        $data['attachment_id'] = $attachment_id;
+        wp_send_json_success( $data );
     }
 
     // =========================================================================
@@ -560,13 +584,7 @@ class UWGS_Alt_Text_Tool {
             $id = absint( $raw_id );
             if ( ! $id ) { continue; }
             if ( 'attachment' !== get_post_type( $id ) ) { continue; }
-            $alt = get_post_meta( $id, self::META_KEY, true );
-            $results[ (string) $id ] = array(
-                'alt'             => $alt,
-                'has_alt'         => ! empty( $alt ),
-                'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
-                'classification'  => $this->uwgs_classify_alt( $alt ),
-            );
+            $results[ (string) $id ] = $this->get_attachment_alt_data( $id );
         }
         wp_send_json_success( $results );
     }
@@ -603,7 +621,7 @@ class UWGS_Alt_Text_Tool {
         ) );
 
         // POST /uwgs-alt-text/v1/attachments/{id} — save alt text for one image.
-        // Body: { alt_text: "…", nonce: "<NONCE_ACTION_id>" }
+        // Body: { alt_text: "…" } — auth via X-WP-Nonce header (no per-ID nonce needed).
         register_rest_route( $namespace, '/attachments/(?P<id>\d+)', array(
             'methods'             => 'POST',
             'callback'            => array( $this, 'rest_save_attachment_alt' ),
@@ -611,6 +629,15 @@ class UWGS_Alt_Text_Tool {
             'args'                => array(
                 'id' => array( 'validate_callback' => function( $v ) { return is_numeric( $v ) && (int) $v > 0; } ),
             ),
+        ) );
+
+        // POST /uwgs-alt-text/v1/attachments/bulk — bulk save alt text.
+        // Body: { updates: [ { id: 1, alt_text: "…" }, … ] }
+        // Response: { updated, skipped, failed, saved_values, counts }
+        register_rest_route( $namespace, '/attachments/bulk', array(
+            'methods'             => 'POST',
+            'callback'            => array( $this, 'rest_bulk_save_attachments' ),
+            'permission_callback' => function() { return current_user_can( 'upload_files' ); },
         ) );
     }
 
@@ -622,14 +649,9 @@ class UWGS_Alt_Text_Tool {
         if ( ! current_user_can( 'edit_post', $id ) ) {
             return new WP_Error( 'forbidden', __( 'You do not have permission to view this attachment.', 'uwgs-alt-text-tool' ), array( 'status' => 403 ) );
         }
-        $alt = get_post_meta( $id, self::META_KEY, true );
-        return rest_ensure_response( array(
-            'alt'             => $alt,
-            'has_alt'         => ! empty( $alt ),
-            'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
-            'classification'  => $this->uwgs_classify_alt( $alt ),
-            'attachment_id'   => $id,
-        ) );
+        $data = $this->get_attachment_alt_data( $id );
+        $data['attachment_id'] = $id;
+        return rest_ensure_response( $data );
     }
 
     public function rest_check_attachments_batch( WP_REST_Request $request ) {
@@ -639,13 +661,7 @@ class UWGS_Alt_Text_Tool {
         foreach ( $raw_ids as $raw_id ) {
             $id = absint( $raw_id );
             if ( ! $id || 'attachment' !== get_post_type( $id ) ) { continue; }
-            $alt = get_post_meta( $id, self::META_KEY, true );
-            $results[ (string) $id ] = array(
-                'alt'             => $alt,
-                'has_alt'         => ! empty( $alt ),
-                'needs_attention' => $this->uwgs_alt_needs_attention( $alt ),
-                'classification'  => $this->uwgs_classify_alt( $alt ),
-            );
+            $results[ (string) $id ] = $this->get_attachment_alt_data( $id );
         }
         return rest_ensure_response( $results );
     }
@@ -658,35 +674,47 @@ class UWGS_Alt_Text_Tool {
         if ( ! current_user_can( 'edit_post', $id ) ) {
             return new WP_Error( 'forbidden', __( 'You do not have permission to edit this attachment.', 'uwgs-alt-text-tool' ), array( 'status' => 403 ) );
         }
-        // REST saves use their own per-ID nonce identical to the admin-ajax path.
-        $nonce = $request->get_param( 'nonce' );
-        if ( ! $nonce || ! wp_verify_nonce( $nonce, self::NONCE_ACTION . '_' . $id ) ) {
-            return new WP_Error( 'bad_nonce', __( 'Security check failed.', 'uwgs-alt-text-tool' ), array( 'status' => 403 ) );
-        }
         $mime = get_post_mime_type( $id );
         if ( strpos( $mime, 'image/' ) !== 0 ) {
             return new WP_Error( 'not_image', __( 'Attachment is not an image.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
         }
         $alt_text = trim( sanitize_text_field( wp_unslash( (string) $request->get_param( 'alt_text' ) ) ) );
-        if ( preg_match( '/^https?:\/\//i', $alt_text ) || preg_match( '/^www\./i', $alt_text ) ) {
-            return new WP_Error( 'url_rejected', __( 'URLs cannot be used as alt text.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
+        $err = $this->validate_alt_text_input( $alt_text );
+        if ( $err ) {
+            return new WP_Error( 'invalid_alt', $err, array( 'status' => 400 ) );
         }
-        $ext_pattern = '/\.('. implode( '|', UWGS_Alt_Quality::IMAGE_EXTENSIONS ). ')$/i';
-        if ( preg_match( $ext_pattern, $alt_text ) ) {
-            return new WP_Error( 'filename_rejected', __( 'Filenames cannot be used as alt text.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
+        return rest_ensure_response( $this->perform_save_alt( $id, $alt_text ) );
+    }
+
+    public function rest_bulk_save_attachments( WP_REST_Request $request ) {
+        $raw_updates = $request->get_param( 'updates' );
+        if ( ! is_array( $raw_updates ) || empty( $raw_updates ) ) {
+            return new WP_Error( 'no_updates', __( 'No updates provided.', 'uwgs-alt-text-tool' ), array( 'status' => 400 ) );
         }
-        update_post_meta( $id, self::META_KEY, $alt_text );
-        if ( ! $this->uwgs_alt_needs_attention( $alt_text ) ) {
+        $updated = array(); $failed = array(); $skipped = array(); $saved_values = array();
+        foreach ( $raw_updates as $item ) {
+            $id       = isset( $item['id'] )       ? absint( $item['id'] )                                          : 0;
+            $alt_text = isset( $item['alt_text'] ) ? trim( sanitize_text_field( wp_unslash( $item['alt_text'] ) ) ) : '';
+            if ( ! $id || empty( $alt_text ) )                                              { $failed[]  = $id; continue; }
+            if ( ! current_user_can( 'edit_post', $id ) )                                   { $failed[]  = $id; continue; }
+            if ( 'attachment' !== get_post_type( $id ) )                                    { $failed[]  = $id; continue; }
+            if ( strpos( get_post_mime_type( $id ), 'image/' ) !== 0 )                      { $failed[]  = $id; continue; }
+            if ( $this->validate_alt_text_input( $alt_text ) )                              { $skipped[] = $id; continue; }
+            if ( $this->uwgs_classify_alt( $alt_text ) !== 'good' )                         { $skipped[] = $id; continue; }
+            $current = get_post_meta( $id, self::META_KEY, true );
+            if ( ! empty( $current ) && $this->uwgs_classify_alt( $current ) === 'good' )   { $skipped[] = $id; continue; }
+            update_post_meta( $id, self::META_KEY, $alt_text );
             delete_post_meta( $id, self::NEEDS_ALT_KEY );
-        } else {
-            update_post_meta( $id, self::NEEDS_ALT_KEY, '1' );
+            $updated[] = $id;
+            $saved_values[ (string) $id ] = $alt_text;
         }
         self::clear_stats_cache();
         return rest_ensure_response( array(
-            'alt_text'        => $alt_text,
-            'needs_attention' => $this->uwgs_alt_needs_attention( $alt_text ),
-            'classification'  => $this->uwgs_classify_alt( $alt_text ),
-            'message'         => __( 'Alt text saved.', 'uwgs-alt-text-tool' ),
+            'updated'      => $updated,
+            'failed'       => $failed,
+            'skipped'      => $skipped,
+            'saved_values' => $saved_values,
+            'counts'       => array( 'updated' => count( $updated ), 'failed' => count( $failed ), 'skipped' => count( $skipped ) ),
         ) );
     }
 
@@ -939,6 +967,8 @@ class UWGS_Alt_Text_Tool {
 
         $data = array(
             'ajaxUrl'       => admin_url( 'admin-ajax.php' ),
+            'restUrl'       => rest_url( 'uwgs-alt-text/v1' ),
+            'restNonce'     => wp_create_nonce( 'wp_rest' ),
             'suggestions'   => $suggestions,
             'instructions'  => wp_kses_post( $instructions ),
             'columnVisible' => ! in_array( 'uwgs_alt_text', get_hidden_columns( 'upload' ), true ),
@@ -957,260 +987,8 @@ class UWGS_Alt_Text_Tool {
         wp_register_script( 'uwgs-list-view', plugins_url( 'js/uwgs-list-view.js', __FILE__ ), array( 'jquery', 'uwgs-alt-utils' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-list-view' );
         wp_add_inline_script( 'uwgs-list-view', 'var uwgsAltData = ' . wp_json_encode( $data ) . ';', 'before' );
-
-        $js = <<<'JS'
-jQuery( function( $ ) {
-
-    var data         = ( typeof uwgsAltData !== 'undefined' ) ? uwgsAltData : {};
-    var ajaxUrl      = data.ajaxUrl     || '';
-    var suggestions  = data.suggestions || {};
-    var instructions = data.instructions || '';
-    var i18n         = data.i18n        || {};
-
-    var IMAGE_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp|svg|bmp|tiff?|avif|heic|heif)$/i;
-
-    // -------------------------------------------------------------------------
-    // Suggestion classification
-    // -------------------------------------------------------------------------
-
-    function sanitizeFilename( raw ) {
-        var s = raw;
-        s = s.replace( /&[#a-zA-Z0-9]+;/g, ' ' );
-        s = s.replace( /\.[a-zA-Z0-9]+$/, '' );
-        s = s.replace( /[-_]+/g, ' ' );
-        s = s.replace( /\b\d+x\d+\b/gi, '' );
-        s = s.replace( /\b(19|20)\d{6}\b/g, '' );
-        s = s.replace( /\b(19|20)\d{2}(?![a-zA-Z0-9])/g, '' );
-        s = s.replace( /\bscaled\b/gi, '' );
-        s = s.replace( /\b\d{1,2}\b/g, '' );
-        s = s.replace( /\s{2,}/g, ' ' ).trim();
-        s = s.replace( /\b[a-zA-Z]/g, function( c ) { return c.toUpperCase(); } );
-        return s;
     }
 
-    function classifySuggestion( suggestion ) {
-        if ( ! suggestion ) { return 'invalid'; }
-        if ( suggestion.type === 'caption' ) { return 'good'; }
-        var sanitized = sanitizeFilename( suggestion.value );
-        var original  = suggestion.value;
-        if ( /^https?:\/\//i.test( original.trim() ) || /^www\./i.test( original.trim() ) ) { return 'invalid'; }
-        if ( IMAGE_EXTENSIONS.test( original.trim() ) || IMAGE_EXTENSIONS.test( sanitized ) ) { return 'invalid'; }
-        if ( sanitized.length < 5 ) { return 'invalid'; }
-        if ( /^(IMG|DSC|DSCN|MVI|MOV|P\d)[_\-\s]/i.test( original.trim() ) ) { return 'invalid'; }
-        var tokens = sanitized.split( /\s+/ ).filter( function( t ) { return t.length > 0; } );
-        var meaningfulWords = tokens.filter( function( t ) {
-            if ( t.length <= 1 ) { return false; }
-            if ( /^\d+$/.test( t ) ) { return false; }
-            if ( /^[A-Z0-9]+$/.test( t ) && ! /[AEIOU]/i.test( t ) ) { return false; }
-            return true;
-        } );
-        if ( meaningfulWords.length === 0 ) { return 'invalid'; }
-        var junkTokens = tokens.filter( function( t ) { return /^\d+$/.test( t ) || ( t.length <= 3 && /^[A-Z0-9]+$/i.test( t ) ); } );
-        if ( junkTokens.length > tokens.length / 2 ) { return 'invalid'; }
-        if ( meaningfulWords.length === 1 && tokens.length === 1 ) { return 'weak'; }
-        return 'good';
-    }
-
-    var classified = {};
-    Object.keys( suggestions ).forEach( function( k ) {
-        classified[ String( k ) ] = classifySuggestion( suggestions[ k ] );
-    } );
-
-    // -------------------------------------------------------------------------
-    // Info bar — settings-driven instructions message
-    // -------------------------------------------------------------------------
-
-    if ( instructions ) {
-        var $bar = $( '<div id="uwgs-info-bar">' ).html( instructions );
-        var $tablenav = $( '.tablenav.top' );
-        if ( $tablenav.length ) { $tablenav.before( $bar ); }
-        else { $( '#wpbody-content .wrap' ).prepend( $bar ); }
-    }
-
-    // -------------------------------------------------------------------------
-    // Input validation
-    // -------------------------------------------------------------------------
-
-    function validateAltText( value ) {
-        var trimmed = value.trim();
-        if ( trimmed === '' ) { return i18n.emptyBlocked || 'Please enter a description before saving.'; }
-        if ( /^https?:\/\//i.test( trimmed ) || /^www\./i.test( trimmed ) ) { return i18n.urlRejected || 'URLs cannot be used as alt text.'; }
-        if ( IMAGE_EXTENSIONS.test( trimmed ) ) { return i18n.filenameRejected || 'Filenames cannot be used as alt text.'; }
-        return null;
-    }
-
-    // -------------------------------------------------------------------------
-    // On page load: pre-populate textareas that have a "good" suggestion
-    // -------------------------------------------------------------------------
-
-    $( '.uwgs-alt-input' ).each( function() {
-        var $ta     = $( this );
-        var postId  = String( $ta.data( 'post-id' ) );
-        var confidence = classified[ postId ] || null;
-        var suggestion = suggestions[ postId ] || null;
-
-        if ( ! suggestion || confidence !== 'good' ) { return; }
-
-        var altText = suggestion.type === 'caption'
-            ? suggestion.value
-            : sanitizeFilename( suggestion.value );
-
-        if ( ! altText || validateAltText( altText ) ) { return; }
-
-        $ta.val( altText );
-
-        // Show hint only for pre-populated rows
-        var $hint = $ta.siblings( '.uwgs-alt-hint' );
-        $hint.text( i18n.suggestionHint || 'Alt text suggestion from image metadata. Please review and save.' ).show();
-        $ta.one( 'input', function() { $hint.hide(); } );
-    } );
-
-    // -------------------------------------------------------------------------
-    // Keyboard navigation: Enter saves, Tab/Cmd+Enter saves and advances
-    // -------------------------------------------------------------------------
-
-    $( document ).on( 'keydown', '.uwgs-alt-input', function( e ) {
-        var $wrap = $( this ).closest( '.uwgs-alt-wrap' );
-        if ( e.which === 13 && ! e.shiftKey && ! e.metaKey && ! e.ctrlKey ) {
-            e.preventDefault();
-            $wrap.find( '.uwgs-alt-save-btn' ).trigger( 'click' );
-            return;
-        }
-        if ( ( e.which === 13 && ( e.metaKey || e.ctrlKey ) ) ||
-             ( e.which === 9  && ! e.shiftKey ) ) {
-            e.preventDefault();
-            saveAndAdvance( $wrap, 1 );
-            return;
-        }
-        if ( e.which === 9 && e.shiftKey ) {
-            e.preventDefault();
-            saveAndAdvance( $wrap, -1 );
-            return;
-        }
-    } );
-
-    // Tab navigation across visible textareas
-    function saveAndAdvance( $currentWrap, direction ) {
-        var $allInputs = $( '.uwgs-alt-editor .uwgs-alt-input' );
-        var $thisInput = $currentWrap.find( '.uwgs-alt-input' );
-        var idx        = $allInputs.index( $thisInput );
-        var $target    = $allInputs.eq( idx + direction );
-
-        var nonce   = $currentWrap.find( '.uwgs-alt-save-btn' ).data( 'nonce' );
-        var postId  = String( $currentWrap.data( 'post-id' ) );
-        var altText = $thisInput.val().trim();
-        var err     = validateAltText( altText );
-
-        if ( err ) {
-            $currentWrap.find( '.uwgs-alt-feedback' ).text( err ).removeClass( 'success' ).addClass( 'error' );
-            return;
-        }
-
-        $.ajax( {
-            url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
-            success: function( r ) {
-                if ( r.success ) { applyColumnSave( $currentWrap, postId, r.data.alt_text || altText, r.data.needs_attention ); }
-            },
-            complete: function() {
-                if ( $target.length ) { $target.trigger( 'focus' ); }
-            }
-        } );
-    }
-
-    // -------------------------------------------------------------------------
-    // Per-row Save button
-    // -------------------------------------------------------------------------
-
-    $( document ).on( 'click', '.uwgs-alt-save-btn', function() {
-        var $btn     = $( this );
-        var $wrap    = $btn.closest( '.uwgs-alt-wrap' );
-        var postId   = String( $wrap.data( 'post-id' ) );
-        var nonce    = $btn.data( 'nonce' );
-        var altText  = $wrap.find( '.uwgs-alt-input' ).val().trim();
-        var $spinner = $wrap.find( '.uwgs-alt-spinner' );
-        var $fb      = $wrap.find( '.uwgs-alt-feedback' );
-
-        var err = validateAltText( altText );
-        if ( err ) {
-            $fb.text( err ).removeClass( 'success' ).addClass( 'error' );
-            return;
-        }
-
-        $btn.prop( 'disabled', true );
-        $spinner.addClass( 'is-active' ).attr( 'aria-hidden', 'true' );
-        $fb.text( '' ).removeClass( 'success error' );
-
-        $.ajax( {
-            url: ajaxUrl, type: 'POST',
-            data: { action: 'uwgs_save_alt_text', post_id: parseInt( postId, 10 ), alt_text: altText, nonce: nonce },
-            success: function( r ) {
-                if ( r.success ) {
-                    applyColumnSave( $wrap, postId, r.data.alt_text || altText, r.data.needs_attention );
-                } else {
-                    $fb.text( r.data || i18n.saveFailed || 'Save failed.' ).addClass( 'error' );
-                }
-            },
-            error: function() {
-                $fb.text( i18n.requestFailed || 'Request failed.' ).addClass( 'error' );
-            },
-            complete: function() {
-                $btn.prop( 'disabled', false );
-                $spinner.removeClass( 'is-active' ).attr( 'aria-hidden', 'true' );
-            }
-        } );
-    } );
-
-    // -------------------------------------------------------------------------
-    // After a successful save:
-    //   - Good quality → replace entire cell with plain green text
-    //   - Still low quality → update badge, keep editor open with error feedback
-    // -------------------------------------------------------------------------
-
-    function applyColumnSave( $wrap, postId, savedAlt, needsAttention ) {
-        var key     = String( postId );
-        var $editor = $wrap.find( '.uwgs-alt-editor' );
-        var $badge  = $wrap.find( '.uwgs-alt-value' );
-        var $fb     = $wrap.find( '.uwgs-alt-feedback' );
-        var $hint   = $wrap.find( '.uwgs-alt-hint' );
-
-        // Update data so future keyboard nav reads correctly
-        $wrap.find( '.uwgs-alt-input' ).attr( 'data-saved-alt', savedAlt );
-        delete classified[ key ];
-        delete suggestions[ key ];
-
-        if ( savedAlt && ! needsAttention ) {
-            // ✓ Good — collapse editor, update badge to green text, stay in DOM
-            $badge.text( savedAlt )
-                  .removeClass( 'uwgs-alt-blank uwgs-low-quality' )
-                  .addClass( 'uwgs-has-alt' )
-                  .removeAttr( 'aria-label' );
-            $wrap.find( '.uwgs-alt-new-flag' ).remove();
-            $hint.hide();
-            $editor.find( '.uwgs-alt-input' ).prop( 'disabled', true );
-            $editor.find( '.uwgs-alt-save-btn' ).prop( 'disabled', true );
-            $editor.hide();
-        } else if ( savedAlt && needsAttention ) {
-            // ⚠ Saved but still low quality — keep editor, update badge, note
-            $badge.text( '⚠ ' + savedAlt )
-                  .removeClass( 'uwgs-alt-blank uwgs-has-alt' )
-                  .addClass( 'uwgs-low-quality' );
-            $hint.hide();
-            $fb.text( i18n.saved || 'Saved.' ).addClass( 'success' );
-            setTimeout( function() { $fb.text( '' ).removeClass( 'success' ); }, 3000 );
-        } else {
-            // Empty saved (shouldn't happen due to validation)
-            $badge.text( i18n.blank || '(blank)' )
-                  .removeClass( 'uwgs-has-alt uwgs-low-quality' )
-                  .addClass( 'uwgs-alt-blank' )
-                  .attr( 'aria-label', 'Alt text is blank' );
-        }
-    }
-
-} );
-JS;
-
-    }
 
     // =========================================================================
     // UPLOAD PAGE ASSETS
