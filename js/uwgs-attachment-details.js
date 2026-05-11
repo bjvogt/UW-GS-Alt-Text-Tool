@@ -89,7 +89,10 @@
             .attr( 'role', 'alert' )
             .text( '⚠ ' + warnMsg );
 
-        $altInput.after( $warning );
+        // Insert after the entire .setting row (not inside it) so the warning
+        // appears as a full-width block between the alt row and the help text,
+        // without affecting the label column inside the .setting span.
+        $altSetting.after( $warning );
 
         // “Use suggestion” button — only when alt is blank and a suggestion exists
         if ( alt === '' ) {

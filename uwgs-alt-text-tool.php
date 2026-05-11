@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           2.9.3
+ * Version:           2.9.5
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -164,7 +164,7 @@ class UWGS_Alt_Text_Tool {
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '2.9.3';
+    const VERSION                = '2.9.5';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
 
@@ -925,10 +925,14 @@ class UWGS_Alt_Text_Tool {
         );
 
         $css = '
-            /* Warning banner — matches .uwgs-attachment-blank-notice style from classic editor */
+            /* Warning banner — inserted as a sibling after the alt .setting row.
+               margin-left:30% aligns it with the textarea column, matching the
+               label's min-width:30%, so the banner never bleeds into the label column. */
             .uwgs-details-warning {
-                margin: 6px 0 4px;
-                padding: 8px 10px;
+                display: block;
+                box-sizing: border-box;
+                margin: 4px 0 4px 30%;
+                padding: 6px 10px;
                 background: #fff3cd;
                 border-left: 4px solid #ffc107;
                 color: #856404;
@@ -938,7 +942,7 @@ class UWGS_Alt_Text_Tool {
             }
             .uwgs-details-suggestion {
                 display: block;
-                margin-top: 4px;
+                margin: 2px 0 4px 30%;
                 white-space: normal;
                 text-align: left;
             }
