@@ -2,7 +2,8 @@
 
 A WordPress plugin built for the UW Graduate School that helps editors write meaningful alt text for every image. It surfaces missing or weak alt text at every point in the editorial workflow — from upload through publish — and offers smart suggestions where possible.
 
-**Version:** 2.9.9  
+**Version:** 3.0.1  
+**Status:** Stable — ready for testing  
 **Requires:** WordPress 6.0+  
 **License:** GPL-2.0+
 
