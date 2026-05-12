@@ -136,6 +136,43 @@
     }
 
     // -------------------------------------------------------------------------
+    // 1b. DOM-based fallback for already-rendered views (e.g. ?item=N URL)
+    //
+    // The render patch fires for future renders, but when the page loads with
+    // ?item=N the view renders before our script patches the prototype.
+    // This scans for any already-rendered .attachment-details at load time.
+    // -------------------------------------------------------------------------
+
+    $( function() {
+        setTimeout( function() {
+            var $el = $( '.attachment-details' );
+            if ( ! $el.length ) { return; }
+            if ( $el.find( '.uwgs-details-warning' ).length ) { return; } // already injected
+
+            // Only images have [data-setting="alt"]
+            var $altInput = $el.find( '[data-setting="alt"] textarea, [data-setting="alt"] input' ).first();
+            if ( ! $altInput.length ) { return; }
+
+            var alt = $altInput.val().trim();
+            if ( ! Utils.needsAttention( alt ) ) { return; }
+
+            var $settingsDiv = $el.find( '.attachment-info .settings' ).first();
+            if ( ! $settingsDiv.length ) { return; }
+
+            var warnMsg = ( alt === '' )
+                ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
+                : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
+
+            var $warning = $( '<div>' )
+                .addClass( 'uwgs-details-warning' )
+                .attr( 'role', 'alert' )
+                .text( '⚠ ' + warnMsg );
+
+            $settingsDiv.before( $warning );
+        }, 0 );
+    } );
+
+    // -------------------------------------------------------------------------
     // Shared helpers for navigation and close warnings
     // -------------------------------------------------------------------------
 
