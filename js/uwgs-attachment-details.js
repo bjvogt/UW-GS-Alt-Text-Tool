@@ -53,17 +53,61 @@
     }
 
     // -------------------------------------------------------------------------
+    // DOM-only injection — works from a .attachment-details element directly.
+    // Safe to call repeatedly — skips if warning already present.
+    // No Backbone model needed; reads state from the DOM.
+    // -------------------------------------------------------------------------
+
+    function injectWarningFromDOM( $el ) {
+        if ( ! $el || ! $el.length ) { return; }
+        if ( $el.find( '.uwgs-details-warning' ).length ) { return; }
+
+        var $altInput = $el.find( '[data-setting="alt"] textarea, [data-setting="alt"] input' ).first();
+        if ( ! $altInput.length ) { return; }
+
+        var alt = ( $altInput.val() || '' ).trim();
+        if ( ! Utils.needsAttention( alt ) ) { return; }
+
+        var $settingsDiv = $el.find( '.attachment-info .settings' ).first();
+        if ( ! $settingsDiv.length ) { return; }
+
+        var warnMsg = ( alt === '' )
+            ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
+            : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
+
+        var $warning = $( '<div>' )
+            .addClass( 'uwgs-details-warning' )
+            .attr( 'role', 'alert' )
+            .text( '⚠ ' + warnMsg );
+
+        $settingsDiv.before( $warning );
+
+        // Clear warning when user types
+        $altInput.one( 'input', function() { $warning.remove(); } );
+    }
+
+    // -------------------------------------------------------------------------
     // Inject inline warning and suggestion button into a Details view.
     // Safe to call repeatedly — removes any prior injection first.
-    // Called in a setTimeout(0) after the original render so WP's own
-    // post-render processing completes before we append.
+    // Uses view.$el + DOM traversal to find the .attachment-details container.
     // -------------------------------------------------------------------------
 
     function injectDetailsUI( view ) {
         if ( ! view || ! view.$el || ! view.model ) { return; }
         if ( view.model.get( 'type' ) !== 'image' ) { return; }
 
-        view.$el.find( '.uwgs-details-warning, .uwgs-details-suggestion' ).remove();
+        // view.$el may be the form fields only or the full .attachment-details panel.
+        // Walk up to find the container that holds .attachment-info .settings.
+        var $container = view.$el.hasClass( 'attachment-details' )
+            ? view.$el
+            : view.$el.closest( '.attachment-details' );
+        if ( ! $container.length ) {
+            // Last resort: search document for the rendered panel.
+            $container = $( '.attachment-details' ).first();
+        }
+        if ( ! $container.length ) { return; }
+
+        $container.find( '.uwgs-details-warning, .uwgs-details-suggestion' ).remove();
 
         var alt = ( view.model.get( 'alt' ) || '' ).trim();
         var needsAttention = ( view.model.get( 'uwgsNeedsAttention' ) !== undefined )
@@ -72,7 +116,7 @@
 
         if ( ! needsAttention ) { return; }
 
-        var $altSetting = view.$el.find( '[data-setting=”alt”]' );
+        var $altSetting = $container.find( '[data-setting="alt"]' );
         if ( ! $altSetting.length ) { return; }
 
         var $altInput = $altSetting.find( 'textarea, input' ).first();
@@ -89,11 +133,11 @@
 
         // Insert between the upload-details block and the form fields — simple
         // full-width placement, no column-alignment required.
-        var $settingsDiv = view.$el.find( '.attachment-info .settings' ).first();
+        var $settingsDiv = $container.find( '.attachment-info .settings' ).first();
         if ( ! $settingsDiv.length ) { return; }
         $settingsDiv.before( $warning );
 
-        // “Use suggestion” button — only when alt is blank and a suggestion exists
+        // "Use suggestion" button — only when alt is blank and a suggestion exists
         if ( alt === '' ) {
             var suggestion = getSuggestion( view.model );
             if ( suggestion ) {
@@ -101,8 +145,8 @@
                     ? ( i18n.useSuggestionCaption  || 'Use caption as alt text' )
                     : ( i18n.useSuggestionFilename || 'Use filename as alt text' );
 
-                var $btn = $( '<button type=”button” class=”button button-small uwgs-details-suggestion”>' )
-                    .text( label + ': “' + suggestion.text + '”' );
+                var $btn = $( '<button type="button" class="button button-small uwgs-details-suggestion">' )
+                    .text( label + ': "' + suggestion.text + '"' );
 
                 $btn.on( 'click', function() {
                     $altInput.val( suggestion.text );
@@ -136,40 +180,45 @@
     }
 
     // -------------------------------------------------------------------------
-    // 1b. DOM-based fallback for already-rendered views (e.g. ?item=N URL)
+    // 1b. DOM-based fallback using MutationObserver.
     //
     // The render patch fires for future renders, but when the page loads with
-    // ?item=N the view renders before our script patches the prototype.
-    // This scans for any already-rendered .attachment-details at load time.
+    // ?item=N, or when the modal opens asynchronously, the view may render
+    // before our script patches the prototype. A MutationObserver watches for
+    // .attachment-details appearing in the DOM and injects the warning then.
     // -------------------------------------------------------------------------
 
     $( function() {
+        // Immediate check — handles ?item=N URL where the view is already in the DOM.
         setTimeout( function() {
-            var $el = $( '.attachment-details' );
-            if ( ! $el.length ) { return; }
-            if ( $el.find( '.uwgs-details-warning' ).length ) { return; } // already injected
-
-            // Only images have [data-setting="alt"]
-            var $altInput = $el.find( '[data-setting="alt"] textarea, [data-setting="alt"] input' ).first();
-            if ( ! $altInput.length ) { return; }
-
-            var alt = $altInput.val().trim();
-            if ( ! Utils.needsAttention( alt ) ) { return; }
-
-            var $settingsDiv = $el.find( '.attachment-info .settings' ).first();
-            if ( ! $settingsDiv.length ) { return; }
-
-            var warnMsg = ( alt === '' )
-                ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
-                : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
-
-            var $warning = $( '<div>' )
-                .addClass( 'uwgs-details-warning' )
-                .attr( 'role', 'alert' )
-                .text( '⚠ ' + warnMsg );
-
-            $settingsDiv.before( $warning );
+            injectWarningFromDOM( $( '.attachment-details' ).first() );
         }, 0 );
+
+        // MutationObserver — fires whenever .attachment-details is added or its
+        // subtree changes (covers async modal open from the grid view).
+        if ( window.MutationObserver ) {
+            var _obs = new MutationObserver( function( mutations ) {
+                for ( var i = 0; i < mutations.length; i++ ) {
+                    var added = mutations[ i ].addedNodes;
+                    for ( var j = 0; j < added.length; j++ ) {
+                        var node = added[ j ];
+                        if ( node.nodeType !== 1 ) { continue; }
+                        var $node = $( node );
+                        // Check if the added node IS .attachment-details or contains one.
+                        var $target = $node.hasClass( 'attachment-details' )
+                            ? $node
+                            : $node.find( '.attachment-details' ).first();
+                        if ( $target.length ) {
+                            // Defer so WP finishes rendering the form fields inside it.
+                            ( function( $t ) {
+                                setTimeout( function() { injectWarningFromDOM( $t ); }, 0 );
+                            } )( $target );
+                        }
+                    }
+                }
+            } );
+            _obs.observe( document.body, { childList: true, subtree: true } );
+        }
     } );
 
     // -------------------------------------------------------------------------
