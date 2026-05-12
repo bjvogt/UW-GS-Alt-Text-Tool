@@ -82,15 +82,16 @@
             ? ( i18n.blankWarning  || 'This image has no alt text. Please add a description.' )
             : ( i18n.weakWarning   || 'Alt text may need improvement. Please review the description.' );
 
-        // Insert warning inside the .setting span, directly after the textarea.
-        // overflow:hidden creates a block formatting context (BFC) which CSS positions
-        // automatically to the right of the floated label — no JS offset measurement needed.
         var $warning = $( '<div>' )
             .addClass( 'uwgs-details-warning' )
             .attr( 'role', 'alert' )
             .text( '⚠ ' + warnMsg );
 
-        $altInput.after( $warning );
+        // Insert between the upload-details block and the form fields — simple
+        // full-width placement, no column-alignment required.
+        var $settingsDiv = view.$el.find( '.attachment-info .settings' ).first();
+        if ( ! $settingsDiv.length ) { return; }
+        $settingsDiv.before( $warning );
 
         // “Use suggestion” button — only when alt is blank and a suggestion exists
         if ( alt === '' ) {

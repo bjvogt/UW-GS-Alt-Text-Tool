@@ -925,33 +925,23 @@ class UWGS_Alt_Text_Tool {
         );
 
         $css = '
-            /* Warning banner — inserted inside .setting after the textarea.
-               overflow:hidden creates a block formatting context (BFC), which CSS
-               positions to the right of the floated label automatically, aligning
-               it exactly with the textarea column without any JS measurement. */
+            /* Warning banner — full-width, between upload details and form fields. */
             .uwgs-details-warning {
                 display: block;
-                overflow: hidden;
-                box-sizing: border-box;
-                margin: 4px 0 2px;
-                padding: 6px 10px;
+                margin: 0 0 10px;
+                padding: 8px 12px;
                 background: #fff3cd;
                 border-left: 4px solid #ffc107;
                 color: #856404;
-                font-size: 12px;
+                font-size: 13px;
                 line-height: 1.5;
                 border-radius: 0 3px 3px 0;
             }
             .uwgs-details-suggestion {
                 display: block;
-                overflow: hidden;
-                margin: 2px 0 4px;
+                margin: -6px 0 10px;
                 white-space: normal;
                 text-align: left;
-            }
-            /* Keep the WP help link in the textarea column. */
-            #alt-text-description {
-                margin-left: 30%;
             }
         ';
 
