@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           3.0.1
+ * Version:           3.1.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -162,11 +162,19 @@ class UWGS_Alt_Text_Tool {
     const NONCE_ACTION           = 'uwgs_alt_text_inline_save';
     const NONCE_ALT_CHECK        = 'uwgs_get_attachment_alt';
     const NONCE_BULK_SAVE        = 'uwgs_bulk_save_alt_text';
+    const NONCE_UNUSED_SCAN      = 'uwgs_unused_scan';
+    const NONCE_UNUSED_ACTION    = 'uwgs_unused_action';
     const META_KEY               = '_wp_attachment_image_alt';
     const NEEDS_ALT_KEY          = '_uwgs_needs_alt';
-    const VERSION                = '3.0.1';
+    const META_UNUSED_STATUS     = '_uwgs_unused_status';
+    const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
+    const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
+    const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
+    const VERSION                = '3.1.0';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
+    const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
+    const OPTION_UNUSED_LAST_SCAN = 'uwgs_unused_last_scan';
 
     const LOW_QUALITY_WORDS = array(
         'image', 'photo', 'img', 'picture', 'screenshot',
@@ -206,6 +214,14 @@ class UWGS_Alt_Text_Tool {
         add_action( 'rest_api_init',                   array( $this, 'register_rest_routes' ) );
         add_action( 'load-upload.php',                 array( $this, 'redirect_alt_sort_to_images' ) );
         add_filter( 'wp_prepare_attachment_for_js',    array( $this, 'add_alt_status_to_attachment_js' ), 10, 2 );
+        // Unused media page + scanner
+        add_action( 'admin_menu',                      array( $this, 'register_unused_media_page' ) );
+        add_action( 'wp_ajax_uwgs_scan_batch',         array( $this, 'ajax_scan_batch' ) );
+        add_action( 'wp_ajax_uwgs_exclude_attachment', array( $this, 'ajax_exclude_attachment' ) );
+        add_action( 'wp_ajax_uwgs_bulk_trash_unused',  array( $this, 'ajax_bulk_trash_unused' ) );
+        add_action( 'wp_ajax_uwgs_export_csv',         array( $this, 'ajax_export_csv' ) );
+        add_action( 'wp_ajax_uwgs_dismiss_scan_notice',array( $this, 'ajax_dismiss_scan_notice' ) );
+        add_action( 'admin_notices',                   array( $this, 'render_unused_scan_notice' ) );
     }
 
     // =========================================================================
@@ -826,8 +842,65 @@ class UWGS_Alt_Text_Tool {
                 <?php endif; ?>
                 <p style="margin:6px 0 0;font-size:11px;color:#999;"><?php esc_html_e( 'Stats refresh every 12 hours.', 'uwgs-alt-text-tool' ); ?> <a href="<?php echo esc_url( add_query_arg( 'uwgs_refresh_stats', '1' ) ); ?>" style="color:#999;"><?php esc_html_e( 'Refresh now', 'uwgs-alt-text-tool' ); ?></a></p>
             <?php endif; ?>
+
+            <?php
+            // Unused media summary
+            $last_scan   = get_option( self::OPTION_UNUSED_LAST_SCAN, 0 );
+            $unused_url  = admin_url( 'upload.php?page=uwgs-unused-media' );
+            ?>
+            <div style="margin-top:14px;padding-top:10px;border-top:1px solid #e0e0e0;">
+                <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+                    <span style="font-weight:600;font-size:13px;color:#1d2327;"><?php esc_html_e( 'Unused Media', 'uwgs-alt-text-tool' ); ?></span>
+                    <a href="<?php echo esc_url( $unused_url ); ?>" style="font-size:12px;"><?php esc_html_e( 'View all →', 'uwgs-alt-text-tool' ); ?></a>
+                </div>
+                <?php if ( ! $last_scan ) : ?>
+                    <p style="margin:2px 0 0;font-size:12px;color:#555;"><?php esc_html_e( 'Not yet scanned.', 'uwgs-alt-text-tool' ); ?> <a href="<?php echo esc_url( $unused_url ); ?>"><?php esc_html_e( 'Run first scan →', 'uwgs-alt-text-tool' ); ?></a></p>
+                <?php else :
+                    $unused_stats = $this->get_unused_stats();
+                    $total_unused = $unused_stats['unused'] + $unused_stats['uncertain'];
+                    ?>
+                    <p style="margin:2px 0 0;font-size:13px;">
+                        <?php if ( $total_unused > 0 ) : ?>
+                            <span style="color:#c62828;font-weight:600;"><?php echo esc_html( number_format_i18n( $total_unused ) ); ?></span>
+                            <span style="color:#555;"> <?php esc_html_e( 'items flagged as potentially unused', 'uwgs-alt-text-tool' ); ?></span>
+                        <?php else : ?>
+                            <span style="color:#2e7d32;font-weight:600;">&#10003; <?php esc_html_e( 'No unused media detected', 'uwgs-alt-text-tool' ); ?></span>
+                        <?php endif; ?>
+                    </p>
+                    <p style="margin:3px 0 0;font-size:11px;color:#999;">
+                        <?php printf( esc_html__( 'Last scanned: %s', 'uwgs-alt-text-tool' ), esc_html( wp_date( get_option( 'date_format' ), $last_scan ) ) ); ?>
+                    </p>
+                <?php endif; ?>
+            </div>
         </div>
         <?php
+    }
+
+    private function get_unused_stats() {
+        $cached = get_transient( 'uwgs_unused_stats' );
+        if ( false !== $cached ) { return $cached; }
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT pm.meta_value AS status, COUNT(*) AS cnt
+                 FROM {$wpdb->posts} p
+                 INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id AND pm.meta_key = %s
+                 WHERE p.post_type = 'attachment' AND p.post_status = 'inherit'
+                   AND pm.meta_value IN ('unused','uncertain')
+                 GROUP BY pm.meta_value",
+                self::META_UNUSED_STATUS
+            )
+        );
+        $stats = array( 'unused' => 0, 'uncertain' => 0 );
+        foreach ( $rows as $row ) {
+            $stats[ $row->status ] = (int) $row->cnt;
+        }
+        set_transient( 'uwgs_unused_stats', $stats, 6 * HOUR_IN_SECONDS );
+        return $stats;
+    }
+
+    public static function clear_unused_stats_cache() {
+        delete_transient( 'uwgs_unused_stats' );
     }
 
     // =========================================================================
@@ -848,6 +921,7 @@ class UWGS_Alt_Text_Tool {
             $this->enqueue_media_grid_assets();
             $this->enqueue_attachment_details_assets();
         }
+        if ( 'media_page_uwgs-unused-media' === $hook ) { $this->enqueue_unused_assets(); }
         if ( 'media-new.php' === $hook ) { $this->enqueue_upload_page_assets(); }
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
             global $post;
@@ -1887,6 +1961,7 @@ JS;
     }
 
     public function register_settings() {
+        // Tab: Alt Text
         register_setting(
             'uwgs_alt_text_settings',
             self::OPTION_INSTRUCTIONS,
@@ -1896,19 +1971,30 @@ JS;
                 'default'           => '',
             )
         );
-        add_settings_section(
-            'uwgs_main',
-            __( 'Media Library Settings', 'uwgs-alt-text-tool' ),
-            '__return_false',
-            'uwgs-alt-text-tool'
+        add_settings_section( 'uwgs_main', __( 'Media Library Settings', 'uwgs-alt-text-tool' ), '__return_false', 'uwgs-alt-text-tool' );
+        add_settings_field( 'uwgs_instructions', __( 'Instructions message', 'uwgs-alt-text-tool' ), array( $this, 'render_instructions_field' ), 'uwgs-alt-text-tool', 'uwgs_main' );
+
+        // Tab: Unused Media
+        register_setting(
+            'uwgs_unused_settings',
+            self::OPTION_UNUSED_SCOPE,
+            array(
+                'type'              => 'string',
+                'sanitize_callback' => function( $v ) { return in_array( $v, array( 'all', 'images' ), true ) ? $v : 'all'; },
+                'default'           => 'all',
+            )
         );
-        add_settings_field(
-            'uwgs_instructions',
-            __( 'Instructions message', 'uwgs-alt-text-tool' ),
-            array( $this, 'render_instructions_field' ),
-            'uwgs-alt-text-tool',
-            'uwgs_main'
-        );
+        add_settings_section( 'uwgs_unused_main', '', '__return_false', 'uwgs-unused-settings' );
+        add_settings_field( 'uwgs_unused_scope', __( 'Scan scope', 'uwgs-alt-text-tool' ), array( $this, 'render_unused_scope_field' ), 'uwgs-unused-settings', 'uwgs_unused_main' );
+    }
+
+    public function render_unused_scope_field() {
+        $value = get_option( self::OPTION_UNUSED_SCOPE, 'all' );
+        echo '<fieldset>';
+        echo '<label><input type="radio" name="' . esc_attr( self::OPTION_UNUSED_SCOPE ) . '" value="all"' . checked( $value, 'all', false ) . '> ' . esc_html__( 'All media types (images, video, audio, documents)', 'uwgs-alt-text-tool' ) . '</label><br>';
+        echo '<label><input type="radio" name="' . esc_attr( self::OPTION_UNUSED_SCOPE ) . '" value="images"' . checked( $value, 'images', false ) . '> ' . esc_html__( 'Images only', 'uwgs-alt-text-tool' ) . '</label>';
+        echo '</fieldset>';
+        echo '<p class="description">' . esc_html__( 'Controls which attachment types are included when scanning for unused media.', 'uwgs-alt-text-tool' ) . '</p>';
     }
 
     public function render_instructions_field() {
@@ -1922,57 +2008,857 @@ JS;
 
     public function render_settings_page() {
         if ( ! current_user_can( 'manage_options' ) ) { return; }
+        $active_tab = isset( $_GET['tab'] ) ? sanitize_key( $_GET['tab'] ) : 'alt-text';
+        $base_url   = admin_url( 'options-general.php?page=uwgs-alt-text-tool' );
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e( 'Alt Text Tool Settings', 'uwgs-alt-text-tool' ); ?></h1>
+            <nav class="nav-tab-wrapper" aria-label="<?php esc_attr_e( 'Settings tabs', 'uwgs-alt-text-tool' ); ?>">
+                <a href="<?php echo esc_url( $base_url . '&tab=alt-text' ); ?>" class="nav-tab<?php echo $active_tab === 'alt-text' ? ' nav-tab-active' : ''; ?>"><?php esc_html_e( 'Alt Text', 'uwgs-alt-text-tool' ); ?></a>
+                <a href="<?php echo esc_url( $base_url . '&tab=unused-media' ); ?>" class="nav-tab<?php echo $active_tab === 'unused-media' ? ' nav-tab-active' : ''; ?>"><?php esc_html_e( 'Unused Media', 'uwgs-alt-text-tool' ); ?></a>
+                <a href="<?php echo esc_url( $base_url . '&tab=google-analytics' ); ?>" class="nav-tab<?php echo $active_tab === 'google-analytics' ? ' nav-tab-active' : ''; ?>"><?php esc_html_e( 'Google Analytics', 'uwgs-alt-text-tool' ); ?></a>
+            </nav>
+
+            <?php if ( $active_tab === 'alt-text' ) : ?>
+                <form method="post" action="options.php" style="margin-top:20px;">
+                    <?php
+                    settings_fields( 'uwgs_alt_text_settings' );
+                    do_settings_sections( 'uwgs-alt-text-tool' );
+                    submit_button();
+                    ?>
+                </form>
+                <hr>
+                <h2><?php esc_html_e( 'How Alt Text Quality Is Evaluated', 'uwgs-alt-text-tool' ); ?></h2>
+                <p><?php esc_html_e( 'Rules are applied in order; the first match determines the outcome.', 'uwgs-alt-text-tool' ); ?></p>
+                <?php $this->render_quality_rules_table(); ?>
+                <p class="description" style="max-width:800px;margin-top:8px;">
+                    <?php esc_html_e( 'Rules are enforced in both PHP and JavaScript. To adjust a rule, update both js/uwgs-alt-utils.js and the UWGS_Alt_Quality class in the plugin file.', 'uwgs-alt-text-tool' ); ?>
+                </p>
+
+            <?php elseif ( $active_tab === 'unused-media' ) : ?>
+                <form method="post" action="options.php" style="margin-top:20px;">
+                    <?php
+                    settings_fields( 'uwgs_unused_settings' );
+                    do_settings_sections( 'uwgs-unused-settings' );
+                    submit_button( __( 'Save Unused Media Settings', 'uwgs-alt-text-tool' ) );
+                    ?>
+                </form>
+                <?php $this->render_excluded_items_table(); ?>
+
+            <?php elseif ( $active_tab === 'google-analytics' ) : ?>
+                <div style="margin-top:20px;max-width:600px;">
+                    <h2 style="margin-top:0;"><?php esc_html_e( 'Google Analytics Integration', 'uwgs-alt-text-tool' ); ?></h2>
+                    <?php
+                    $site_kit_active = $this->is_site_kit_ga4_connected();
+                    if ( $site_kit_active ) : ?>
+                        <div class="notice notice-success inline" style="margin:0 0 16px;">
+                            <p><?php esc_html_e( 'Google Site Kit is connected and GA4 is active. Traffic data integration will use this connection — no additional setup required.', 'uwgs-alt-text-tool' ); ?></p>
+                        </div>
+                        <p><?php esc_html_e( 'When GA4 data syncing is added in a future update, it will automatically use your existing Site Kit authentication.', 'uwgs-alt-text-tool' ); ?></p>
+                    <?php else : ?>
+                        <div class="notice notice-info inline" style="margin:0 0 16px;">
+                            <p><?php printf( esc_html__( 'Google Site Kit is not connected. To enable GA4 traffic data in the Unused Media scanner, %s and connect it to GA4.', 'uwgs-alt-text-tool' ), '<a href="' . esc_url( admin_url( 'admin.php?page=googlesitekit-splash' ) ) . '">' . esc_html__( 'install Google Site Kit', 'uwgs-alt-text-tool' ) . '</a>' ); ?></p>
+                        </div>
+                        <p style="color:#555;"><?php esc_html_e( 'GA4 traffic data integration is planned for a future update. It will show pageview counts per media file so you can prioritize which unused items are safe to remove.', 'uwgs-alt-text-tool' ); ?></p>
+                    <?php endif; ?>
+                </div>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    private function render_quality_rules_table() {
         $rules = UWGS_Alt_Quality::get_rules_description();
-        $outcome_colors = array(
-            'needs_attention' => '#c62828',
-            'weak'            => '#856404',
-            'good'            => '#2e7d32',
-        );
+        $outcome_colors = array( 'needs_attention' => '#c62828', 'weak' => '#856404', 'good' => '#2e7d32' );
         $outcome_labels = array(
             'needs_attention' => __( 'Needs attention', 'uwgs-alt-text-tool' ),
             'weak'            => __( 'Weak quality', 'uwgs-alt-text-tool' ),
             'good'            => __( 'Good quality', 'uwgs-alt-text-tool' ),
         );
         ?>
-        <div class="wrap">
-            <h1><?php esc_html_e( 'Alt Text Tool Settings', 'uwgs-alt-text-tool' ); ?></h1>
-            <form method="post" action="options.php">
-                <?php
-                settings_fields( 'uwgs_alt_text_settings' );
-                do_settings_sections( 'uwgs-alt-text-tool' );
-                submit_button();
-                ?>
-            </form>
+        <table class="widefat striped" style="max-width:800px;">
+            <thead><tr>
+                <th><?php esc_html_e( 'Rule', 'uwgs-alt-text-tool' ); ?></th>
+                <th><?php esc_html_e( 'Description', 'uwgs-alt-text-tool' ); ?></th>
+                <th><?php esc_html_e( 'Outcome', 'uwgs-alt-text-tool' ); ?></th>
+            </tr></thead>
+            <tbody>
+            <?php foreach ( $rules as $rule ) :
+                $color = isset( $outcome_colors[ $rule['outcome'] ] ) ? $outcome_colors[ $rule['outcome'] ] : '#555';
+                $label = isset( $outcome_labels[ $rule['outcome'] ] ) ? $outcome_labels[ $rule['outcome'] ] : esc_html( $rule['outcome'] );
+            ?>
+                <tr>
+                    <td style="font-weight:600;white-space:nowrap;"><?php echo esc_html( $rule['label'] ); ?></td>
+                    <td><?php echo esc_html( $rule['description'] ); ?></td>
+                    <td style="color:<?php echo esc_attr( $color ); ?>;font-weight:600;white-space:nowrap;"><?php echo esc_html( $label ); ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+    }
 
-            <hr>
-            <h2><?php esc_html_e( 'How Alt Text Quality Is Evaluated', 'uwgs-alt-text-tool' ); ?></h2>
-            <p><?php esc_html_e( 'The following rules are applied to every image\'s alt text. Rules are checked in order; the first matching rule determines the outcome.', 'uwgs-alt-text-tool' ); ?></p>
-            <table class="widefat striped" style="max-width:800px;">
-                <thead>
-                    <tr>
-                        <th><?php esc_html_e( 'Rule', 'uwgs-alt-text-tool' ); ?></th>
-                        <th><?php esc_html_e( 'Description', 'uwgs-alt-text-tool' ); ?></th>
-                        <th><?php esc_html_e( 'Outcome', 'uwgs-alt-text-tool' ); ?></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php foreach ( $rules as $rule ) :
-                        $color = isset( $outcome_colors[ $rule['outcome'] ] ) ? $outcome_colors[ $rule['outcome'] ] : '#555';
-                        $label = isset( $outcome_labels[ $rule['outcome'] ] ) ? $outcome_labels[ $rule['outcome'] ] : esc_html( $rule['outcome'] );
-                    ?>
-                    <tr>
-                        <td style="font-weight:600;white-space:nowrap;"><?php echo esc_html( $rule['label'] ); ?></td>
-                        <td><?php echo esc_html( $rule['description'] ); ?></td>
-                        <td style="color:<?php echo esc_attr( $color ); ?>;font-weight:600;white-space:nowrap;"><?php echo esc_html( $label ); ?></td>
-                    </tr>
-                    <?php endforeach; ?>
-                </tbody>
-            </table>
-            <p class="description" style="max-width:800px;margin-top:8px;">
-                <?php esc_html_e( 'These rules are enforced in both PHP (server-side save and the media library) and JavaScript (inline editing and pre-save warnings). If you need to adjust a rule, update both js/uwgs-alt-utils.js and the UWGS_Alt_Quality class in the plugin file.', 'uwgs-alt-text-tool' ); ?>
-            </p>
+    private function render_excluded_items_table() {
+        global $wpdb;
+        $excluded = $wpdb->get_results( $wpdb->prepare(
+            "SELECT p.ID, p.post_title, p.post_mime_type, p.post_date
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+             WHERE p.post_type = 'attachment' AND p.post_status = 'inherit'
+               AND pm.meta_key = %s AND pm.meta_value = 'excluded'
+             ORDER BY p.post_date DESC LIMIT 200",
+            self::META_UNUSED_STATUS
+        ) );
+        if ( empty( $excluded ) ) { return; }
+        $nonce = wp_create_nonce( self::NONCE_UNUSED_ACTION );
+        ?>
+        <hr style="margin-top:24px;">
+        <h2><?php esc_html_e( 'Excluded Items', 'uwgs-alt-text-tool' ); ?></h2>
+        <p class="description"><?php esc_html_e( 'These items were manually excluded from unused media scans. Remove exclusion to include them in future scans.', 'uwgs-alt-text-tool' ); ?></p>
+        <table class="widefat striped" style="max-width:800px;">
+            <thead><tr>
+                <th><?php esc_html_e( 'File', 'uwgs-alt-text-tool' ); ?></th>
+                <th><?php esc_html_e( 'Type', 'uwgs-alt-text-tool' ); ?></th>
+                <th><?php esc_html_e( 'Uploaded', 'uwgs-alt-text-tool' ); ?></th>
+                <th><?php esc_html_e( 'Action', 'uwgs-alt-text-tool' ); ?></th>
+            </tr></thead>
+            <tbody>
+            <?php foreach ( $excluded as $item ) : ?>
+                <tr>
+                    <td><?php echo esc_html( $item->post_title ); ?></td>
+                    <td><?php echo esc_html( $item->post_mime_type ); ?></td>
+                    <td><?php echo esc_html( get_the_date( 'Y-m-d', $item->ID ) ); ?></td>
+                    <td>
+                        <button type="button" class="button button-small uwgs-unexclude"
+                                data-id="<?php echo esc_attr( $item->ID ); ?>"
+                                data-nonce="<?php echo esc_attr( $nonce ); ?>">
+                            <?php esc_html_e( 'Remove exclusion', 'uwgs-alt-text-tool' ); ?>
+                        </button>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+    }
+
+    private function is_site_kit_ga4_connected() {
+        if ( ! function_exists( 'googlesitekit_activate' ) && ! class_exists( 'Google\Site_Kit\Plugin' ) ) {
+            return false;
+        }
+        $options = get_option( 'googlesitekit_analytics-4_settings', array() );
+        return ! empty( $options['propertyID'] );
+    }
+
+    // =========================================================================
+    // UNUSED MEDIA: ADMIN PAGE
+    // =========================================================================
+
+    public function register_unused_media_page() {
+        if ( ! current_user_can( 'upload_files' ) ) { return; }
+        add_submenu_page(
+            'upload.php',
+            __( 'Unused Media', 'uwgs-alt-text-tool' ),
+            __( 'Unused Media', 'uwgs-alt-text-tool' ),
+            'upload_files',
+            'uwgs-unused-media',
+            array( $this, 'render_unused_media_page' )
+        );
+    }
+
+    public function render_unused_media_page() {
+        if ( ! current_user_can( 'upload_files' ) ) { return; }
+
+        $last_scan   = get_option( self::OPTION_UNUSED_LAST_SCAN, 0 );
+        $confidence  = isset( $_GET['confidence'] ) ? sanitize_key( $_GET['confidence'] ) : 'all';
+        $type_filter = isset( $_GET['media_type'] ) ? sanitize_key( $_GET['media_type'] ) : 'all';
+        $paged       = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
+        $per_page    = 50;
+
+        $results = $this->get_unused_attachments( array(
+            'confidence' => $confidence,
+            'type'       => $type_filter,
+            'per_page'   => $per_page,
+            'page'       => $paged,
+        ) );
+
+        $attachments = $results['attachments'];
+        $total       = $results['total'];
+        $total_pages = $results['pages'];
+
+        $scan_nonce   = wp_create_nonce( self::NONCE_UNUSED_SCAN );
+        $action_nonce = wp_create_nonce( self::NONCE_UNUSED_ACTION );
+        $base_url     = admin_url( 'upload.php?page=uwgs-unused-media' );
+
+        // Stale scan warning threshold: 7 days
+        $scan_stale = $last_scan && ( time() - $last_scan ) > 7 * DAY_IN_SECONDS;
+        ?>
+        <div class="wrap" id="uwgs-unused-wrap">
+            <h1 class="wp-heading-inline"><?php esc_html_e( 'Unused Media', 'uwgs-alt-text-tool' ); ?></h1>
+            <span style="margin-left:12px;">
+                <button type="button" id="uwgs-rescan-btn" class="button"
+                        data-nonce="<?php echo esc_attr( $scan_nonce ); ?>">
+                    &#9654; <?php esc_html_e( 'Rescan', 'uwgs-alt-text-tool' ); ?>
+                </button>
+            </span>
+
+            <?php if ( $scan_stale ) : ?>
+                <div class="notice notice-warning inline" style="margin:8px 0;">
+                    <p><?php printf( esc_html__( 'Scan results are from %s and may be outdated. Run a new scan for current results.', 'uwgs-alt-text-tool' ), esc_html( wp_date( get_option( 'date_format' ), $last_scan ) ) ); ?></p>
+                </div>
+            <?php endif; ?>
+
+            <div id="uwgs-scan-progress" style="display:none;margin:12px 0;max-width:500px;">
+                <p id="uwgs-scan-status" style="margin:0 0 6px;font-size:13px;color:#555;"></p>
+                <div style="background:#e0e0e0;border-radius:4px;height:12px;overflow:hidden;">
+                    <div id="uwgs-scan-bar" style="background:#0073aa;width:0%;height:100%;border-radius:4px;transition:width 0.2s ease;"></div>
+                </div>
+            </div>
+
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin:16px 0 12px;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                    <?php if ( $last_scan ) : ?>
+                        <span style="font-size:12px;color:#777;">
+                            <?php printf( esc_html__( 'Scanned %s', 'uwgs-alt-text-tool' ), esc_html( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $last_scan ) ) ); ?>
+                            &middot;
+                            <?php printf( esc_html__( '%s items', 'uwgs-alt-text-tool' ), '<strong>' . esc_html( number_format_i18n( $total ) ) . '</strong>' ); ?>
+                        </span>
+                    <?php else : ?>
+                        <span style="font-size:12px;color:#777;"><?php esc_html_e( 'No scan has been run yet.', 'uwgs-alt-text-tool' ); ?></span>
+                    <?php endif; ?>
+
+                    <!-- Type filter -->
+                    <span style="font-size:12px;">
+                        <?php
+                        $types = array(
+                            'all'      => __( 'All types', 'uwgs-alt-text-tool' ),
+                            'image'    => __( 'Images', 'uwgs-alt-text-tool' ),
+                            'video'    => __( 'Video', 'uwgs-alt-text-tool' ),
+                            'audio'    => __( 'Audio', 'uwgs-alt-text-tool' ),
+                            'document' => __( 'Documents', 'uwgs-alt-text-tool' ),
+                        );
+                        foreach ( $types as $key => $label ) :
+                            $url = add_query_arg( array( 'media_type' => $key, 'confidence' => $confidence, 'paged' => 1 ), $base_url );
+                            if ( $key === $type_filter ) :
+                                echo '<strong>' . esc_html( $label ) . '</strong>';
+                            else :
+                                echo '<a href="' . esc_url( $url ) . '">' . esc_html( $label ) . '</a>';
+                            endif;
+                            echo $key !== 'document' ? ' &middot; ' : '';
+                        endforeach;
+                        ?>
+                    </span>
+
+                    <!-- Confidence filter -->
+                    <span style="font-size:12px;">
+                        <?php
+                        $conf_opts = array(
+                            'all'       => __( 'All confidence', 'uwgs-alt-text-tool' ),
+                            'unused'    => __( 'Unused only', 'uwgs-alt-text-tool' ),
+                            'uncertain' => __( 'Uncertain only', 'uwgs-alt-text-tool' ),
+                        );
+                        foreach ( $conf_opts as $key => $label ) :
+                            $url = add_query_arg( array( 'confidence' => $key, 'media_type' => $type_filter, 'paged' => 1 ), $base_url );
+                            if ( $key === $confidence ) :
+                                echo '<strong>' . esc_html( $label ) . '</strong>';
+                            else :
+                                echo '<a href="' . esc_url( $url ) . '">' . esc_html( $label ) . '</a>';
+                            endif;
+                            echo $key !== 'uncertain' ? ' &middot; ' : '';
+                        endforeach;
+                        ?>
+                    </span>
+                </div>
+
+                <?php if ( ! empty( $attachments ) ) : ?>
+                    <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'action' => 'uwgs_export_csv', 'confidence' => $confidence, 'media_type' => $type_filter ), admin_url( 'admin-ajax.php' ) ), self::NONCE_UNUSED_ACTION, 'nonce' ) ); ?>" class="button">
+                        &#8595; <?php esc_html_e( 'Export CSV', 'uwgs-alt-text-tool' ); ?>
+                    </a>
+                <?php endif; ?>
+            </div>
+
+            <?php if ( empty( $attachments ) ) : ?>
+                <p style="color:#555;margin:24px 0;">
+                    <?php if ( ! $last_scan ) : ?>
+                        <?php esc_html_e( 'Click Rescan to scan your media library for unused items.', 'uwgs-alt-text-tool' ); ?>
+                    <?php else : ?>
+                        <?php esc_html_e( 'No unused media found matching the current filters.', 'uwgs-alt-text-tool' ); ?>
+                    <?php endif; ?>
+                </p>
+            <?php else : ?>
+
+                <form method="post" id="uwgs-unused-form">
+                    <?php wp_nonce_field( self::NONCE_UNUSED_ACTION, 'uwgs_unused_nonce' ); ?>
+                    <div class="tablenav top" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                        <select id="uwgs-bulk-action" name="bulk_action">
+                            <option value=""><?php esc_html_e( 'Bulk actions', 'uwgs-alt-text-tool' ); ?></option>
+                            <option value="trash"><?php esc_html_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?></option>
+                        </select>
+                        <button type="button" id="uwgs-bulk-apply" class="button"><?php esc_html_e( 'Apply', 'uwgs-alt-text-tool' ); ?></button>
+                        <span id="uwgs-bulk-feedback" style="font-size:12px;color:#555;"></span>
+                    </div>
+
+                    <table class="wp-list-table widefat fixed striped" id="uwgs-unused-table">
+                        <thead><tr>
+                            <td class="check-column"><input type="checkbox" id="uwgs-select-all" aria-label="<?php esc_attr_e( 'Select all', 'uwgs-alt-text-tool' ); ?>"></td>
+                            <th style="width:60px;"><?php esc_html_e( 'Preview', 'uwgs-alt-text-tool' ); ?></th>
+                            <th><?php esc_html_e( 'File', 'uwgs-alt-text-tool' ); ?></th>
+                            <th style="width:80px;"><?php esc_html_e( 'Type', 'uwgs-alt-text-tool' ); ?></th>
+                            <th style="width:70px;"><?php esc_html_e( 'Size', 'uwgs-alt-text-tool' ); ?></th>
+                            <th style="width:100px;"><?php esc_html_e( 'Uploaded', 'uwgs-alt-text-tool' ); ?></th>
+                            <th style="width:100px;"><?php esc_html_e( 'By', 'uwgs-alt-text-tool' ); ?></th>
+                            <th style="width:110px;"><?php esc_html_e( 'Confidence', 'uwgs-alt-text-tool' ); ?></th>
+                            <th style="width:120px;"><?php esc_html_e( 'Actions', 'uwgs-alt-text-tool' ); ?></th>
+                        </tr></thead>
+                        <tbody>
+                        <?php foreach ( $attachments as $attachment ) :
+                            $status    = get_post_meta( $attachment->ID, self::META_UNUSED_STATUS, true );
+                            $mime      = $attachment->post_mime_type;
+                            $is_image  = strpos( $mime, 'image/' ) === 0;
+                            $thumb_url = $is_image ? wp_get_attachment_image_url( $attachment->ID, array( 40, 40 ) ) : '';
+                            $file_url  = wp_get_attachment_url( $attachment->ID );
+                            $meta      = wp_get_attachment_metadata( $attachment->ID );
+                            $file_size = '';
+                            if ( isset( $meta['filesize'] ) ) {
+                                $file_size = size_format( $meta['filesize'] );
+                            } elseif ( $file_url ) {
+                                $file_path = get_attached_file( $attachment->ID );
+                                if ( $file_path && file_exists( $file_path ) ) {
+                                    $file_size = size_format( filesize( $file_path ) );
+                                }
+                            }
+                            $author    = get_userdata( $attachment->post_author );
+                            $author_name = $author ? $author->display_name : '—';
+                            $conf_label = $status === 'unused'
+                                ? '<span style="color:#c62828;font-weight:600;" title="' . esc_attr__( 'No reference found anywhere in content, metadata, options, or theme files', 'uwgs-alt-text-tool' ) . '">&bull; ' . esc_html__( 'Unused', 'uwgs-alt-text-tool' ) . '</span>'
+                                : '<span style="color:#856404;font-weight:600;" title="' . esc_attr__( 'Found only in trashed content — may be safely removable', 'uwgs-alt-text-tool' ) . '">&#9670; ' . esc_html__( 'Uncertain', 'uwgs-alt-text-tool' ) . '</span>';
+                        ?>
+                            <tr data-id="<?php echo esc_attr( $attachment->ID ); ?>">
+                                <th class="check-column"><input type="checkbox" name="attachment_ids[]" value="<?php echo esc_attr( $attachment->ID ); ?>"></th>
+                                <td>
+                                    <?php if ( $thumb_url ) : ?>
+                                        <a href="<?php echo esc_url( $file_url ); ?>" target="_blank">
+                                            <img src="<?php echo esc_url( $thumb_url ); ?>" alt="" width="40" height="40" style="object-fit:cover;border-radius:2px;display:block;">
+                                        </a>
+                                    <?php else : ?>
+                                        <span style="font-size:20px;display:block;text-align:center;" aria-hidden="true">&#128196;</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td>
+                                    <a href="<?php echo esc_url( $file_url ); ?>" target="_blank" style="word-break:break-all;">
+                                        <?php echo esc_html( basename( $file_url ) ); ?>
+                                    </a>
+                                    <?php if ( $attachment->post_title && $attachment->post_title !== basename( $file_url ) ) : ?>
+                                        <div style="font-size:11px;color:#777;"><?php echo esc_html( $attachment->post_title ); ?></div>
+                                    <?php endif; ?>
+                                </td>
+                                <td style="font-size:11px;color:#555;"><?php echo esc_html( $mime ); ?></td>
+                                <td style="font-size:12px;color:#555;"><?php echo esc_html( $file_size ?: '—' ); ?></td>
+                                <td style="font-size:12px;"><?php echo esc_html( get_the_date( 'Y-m-d', $attachment->ID ) ); ?></td>
+                                <td style="font-size:12px;"><?php echo esc_html( $author_name ); ?></td>
+                                <td><?php echo $conf_label; ?></td>
+                                <td>
+                                    <button type="button" class="button button-small uwgs-exclude-btn"
+                                            data-id="<?php echo esc_attr( $attachment->ID ); ?>"
+                                            data-nonce="<?php echo esc_attr( $action_nonce ); ?>"
+                                            title="<?php esc_attr_e( 'Keep this item — exclude from future scans', 'uwgs-alt-text-tool' ); ?>">
+                                        <?php esc_html_e( 'Keep', 'uwgs-alt-text-tool' ); ?>
+                                    </button>
+                                    <button type="button" class="button button-small uwgs-trash-single-btn"
+                                            data-id="<?php echo esc_attr( $attachment->ID ); ?>"
+                                            data-nonce="<?php echo esc_attr( $action_nonce ); ?>"
+                                            style="margin-top:4px;color:#b32d2e;border-color:#b32d2e;"
+                                            title="<?php esc_attr_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?>">
+                                        <?php esc_html_e( 'Trash', 'uwgs-alt-text-tool' ); ?>
+                                    </button>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+
+                    <?php if ( $total_pages > 1 ) : ?>
+                        <div class="tablenav bottom" style="margin-top:12px;">
+                            <?php
+                            $pagination_args = array(
+                                'base'    => add_query_arg( 'paged', '%#%', $base_url ),
+                                'format'  => '',
+                                'current' => $paged,
+                                'total'   => $total_pages,
+                                'add_args' => array( 'confidence' => $confidence, 'media_type' => $type_filter ),
+                            );
+                            echo paginate_links( $pagination_args );
+                            ?>
+                        </div>
+                    <?php endif; ?>
+
+                    <div id="uwgs-trash-confirm-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">
+                        <div style="background:#fff;border-radius:4px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 24px rgba(0,0,0,0.2);" role="alertdialog" aria-labelledby="uwgs-trash-confirm-title" aria-modal="true">
+                            <h2 id="uwgs-trash-confirm-title" style="margin:0 0 12px;font-size:16px;"><?php esc_html_e( 'Move to Trash?', 'uwgs-alt-text-tool' ); ?></h2>
+                            <p id="uwgs-trash-confirm-msg" style="margin:0 0 16px;font-size:13px;color:#555;"></p>
+                            <p style="margin:0 0 20px;font-size:12px;color:#777;"><?php esc_html_e( 'Items will be moved to Trash. You have 30 days to restore them via Media > Library.', 'uwgs-alt-text-tool' ); ?></p>
+                            <div style="display:flex;gap:8px;">
+                                <button type="button" id="uwgs-trash-confirm-yes" class="button button-primary"><?php esc_html_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?></button>
+                                <button type="button" id="uwgs-trash-confirm-no" class="button"><?php esc_html_e( 'Cancel', 'uwgs-alt-text-tool' ); ?></button>
+                            </div>
+                        </div>
+                    </div>
+                </form>
+            <?php endif; ?>
         </div>
         <?php
+    }
+
+    private function get_unused_attachments( $args = array() ) {
+        $defaults = array(
+            'confidence' => 'all',
+            'type'       => 'all',
+            'per_page'   => 50,
+            'page'       => 1,
+            'orderby'    => 'date',
+            'order'      => 'DESC',
+        );
+        $args = wp_parse_args( $args, $defaults );
+
+        $status_values = array( 'unused', 'uncertain' );
+        if ( $args['confidence'] === 'unused' )    { $status_values = array( 'unused' ); }
+        if ( $args['confidence'] === 'uncertain' ) { $status_values = array( 'uncertain' ); }
+
+        $query_args = array(
+            'post_type'      => 'attachment',
+            'post_status'    => 'inherit',
+            'posts_per_page' => $args['per_page'],
+            'paged'          => $args['page'],
+            'orderby'        => 'date',
+            'order'          => $args['order'],
+            'meta_query'     => array( array(
+                'key'     => self::META_UNUSED_STATUS,
+                'value'   => $status_values,
+                'compare' => 'IN',
+            ) ),
+        );
+
+        if ( $args['type'] !== 'all' ) {
+            switch ( $args['type'] ) {
+                case 'image':    $query_args['post_mime_type'] = 'image'; break;
+                case 'video':    $query_args['post_mime_type'] = 'video'; break;
+                case 'audio':    $query_args['post_mime_type'] = 'audio'; break;
+                case 'document':
+                    $query_args['post_mime_type'] = array(
+                        'application/pdf',
+                        'application/msword',
+                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        'application/vnd.ms-excel',
+                        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        'text/plain',
+                        'text/csv',
+                    );
+                    break;
+            }
+        }
+
+        $query = new WP_Query( $query_args );
+        return array(
+            'attachments' => $query->posts,
+            'total'       => $query->found_posts,
+            'pages'       => $query->max_num_pages,
+        );
+    }
+
+    // =========================================================================
+    // UNUSED MEDIA: SCANNER
+    // =========================================================================
+
+    private function build_theme_index() {
+        $dirs = array_unique( array_filter( array(
+            get_template_directory(),
+            get_stylesheet_directory(),
+        ) ) );
+
+        $references = array();
+        foreach ( $dirs as $dir ) {
+            if ( ! is_dir( $dir ) ) { continue; }
+            try {
+                $iterator = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+                    RecursiveIteratorIterator::LEAVES_ONLY
+                );
+                foreach ( $iterator as $file ) {
+                    if ( ! $file->isFile() ) { continue; }
+                    if ( ! in_array( strtolower( $file->getExtension() ), array( 'php', 'css', 'js' ), true ) ) { continue; }
+                    $content = @file_get_contents( $file->getPathname() );
+                    if ( false === $content || strpos( $content, '/uploads/' ) === false ) { continue; }
+                    preg_match_all( '#/uploads/[^\s\'")\]>\\\\]+#', $content, $matches );
+                    foreach ( $matches[0] as $match ) {
+                        $references[] = trim( $match, '"\'()[]{}<>' );
+                    }
+                }
+            } catch ( Exception $e ) {
+                // Unreadable directory — skip silently.
+            }
+        }
+
+        return array_unique( $references );
+    }
+
+    private function scan_attachment_status( $id, array $theme_index ) {
+        global $wpdb;
+
+        $url = wp_get_attachment_url( $id );
+        if ( ! $url ) { return 'in_use'; }
+
+        $upload_dir = wp_upload_dir();
+        $rel_path   = ltrim( str_replace( $upload_dir['baseurl'], '', $url ), '/' );
+        if ( empty( $rel_path ) ) { return 'in_use'; }
+
+        $filename   = basename( $rel_path );
+        $like_path  = '%' . $wpdb->esc_like( $rel_path ) . '%';
+        $like_fname = '%' . $wpdb->esc_like( $filename ) . '%';
+        $id_str     = (string) $id;
+
+        // 1. post_content — published/draft (not trash, not auto-draft, not attachments)
+        $in_content = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts}
+             WHERE post_type != 'attachment'
+               AND post_status NOT IN ('trash','auto-draft')
+               AND ( post_content LIKE %s
+                  OR post_content LIKE %s
+                  OR post_content LIKE %s )",
+            $like_path,
+            '%"id":' . $id . '%',
+            '%"id": ' . $id . '%'
+        ) );
+        if ( $in_content > 0 ) { return 'in_use'; }
+
+        // Check trashed content separately (for uncertain status)
+        $in_trash_content = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->posts}
+             WHERE post_type != 'attachment' AND post_status = 'trash'
+               AND ( post_content LIKE %s OR post_content LIKE %s OR post_content LIKE %s )",
+            $like_path, '%"id":' . $id . '%', '%"id": ' . $id . '%'
+        ) );
+
+        // 2. postmeta — featured images (exact ID), ACF/custom fields, serialized data
+        $in_meta = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->postmeta}
+             WHERE meta_value = %s OR meta_value LIKE %s",
+            $id_str, $like_fname
+        ) );
+        if ( $in_meta > 0 ) { return 'in_use'; }
+
+        // 3. wp_options — widgets, customizer, theme mods (autoloaded only for performance)
+        $in_options = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM {$wpdb->options}
+             WHERE autoload = 'yes' AND option_value LIKE %s",
+            $like_fname
+        ) );
+        if ( $in_options > 0 ) { return 'in_use'; }
+
+        // 4. Theme files index
+        foreach ( $theme_index as $ref ) {
+            if ( strpos( $ref, $filename ) !== false ) { return 'in_use'; }
+        }
+
+        // Found only in trash → uncertain
+        if ( $in_trash_content > 0 ) { return 'uncertain'; }
+
+        return 'unused';
+    }
+
+    // =========================================================================
+    // UNUSED MEDIA: AJAX HANDLERS
+    // =========================================================================
+
+    public function ajax_scan_batch() {
+        check_ajax_referer( self::NONCE_UNUSED_SCAN, 'nonce' );
+        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Permission denied.' ); }
+
+        $offset     = isset( $_POST['offset'] ) ? absint( $_POST['offset'] ) : 0;
+        $batch_size = 50;
+
+        // Build theme index once at the start of each full scan
+        if ( $offset === 0 ) {
+            $theme_index = $this->build_theme_index();
+            set_transient( 'uwgs_theme_index', $theme_index, HOUR_IN_SECONDS );
+        } else {
+            $theme_index = get_transient( 'uwgs_theme_index' );
+            if ( false === $theme_index ) {
+                $theme_index = $this->build_theme_index();
+                set_transient( 'uwgs_theme_index', $theme_index, HOUR_IN_SECONDS );
+            }
+        }
+
+        $scope = get_option( self::OPTION_UNUSED_SCOPE, 'all' );
+
+        global $wpdb;
+        $mime_clause = '';
+        if ( $scope === 'images' ) {
+            $mime_clause = "AND post_mime_type LIKE 'image/%'";
+        }
+
+        $total = (int) $wpdb->get_var(
+            "SELECT COUNT(*) FROM {$wpdb->posts}
+             WHERE post_type = 'attachment' AND post_status = 'inherit' {$mime_clause}"
+        );
+
+        $ids = $wpdb->get_col( $wpdb->prepare(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_type = 'attachment' AND post_status = 'inherit' {$mime_clause}
+             ORDER BY ID ASC LIMIT %d OFFSET %d",
+            $batch_size, $offset
+        ) );
+
+        foreach ( $ids as $raw_id ) {
+            $att_id  = (int) $raw_id;
+            $current = get_post_meta( $att_id, self::META_UNUSED_STATUS, true );
+            if ( $current === 'excluded' ) { continue; }
+
+            $status = $this->scan_attachment_status( $att_id, $theme_index );
+            update_post_meta( $att_id, self::META_UNUSED_STATUS, $status );
+
+            // Cache file size during scan so we don't re-stat later
+            $meta = wp_get_attachment_metadata( $att_id );
+            if ( isset( $meta['filesize'] ) ) {
+                update_post_meta( $att_id, self::META_UNUSED_FILE_SIZE, (int) $meta['filesize'] );
+            }
+        }
+
+        $processed = $offset + count( $ids );
+        $done      = ( $processed >= $total || count( $ids ) === 0 );
+
+        if ( $done ) {
+            update_option( self::OPTION_UNUSED_LAST_SCAN, time() );
+            delete_transient( 'uwgs_theme_index' );
+            self::clear_unused_stats_cache();
+            $this->log_scan_to_stream();
+            $this->set_scan_notice_flags();
+        }
+
+        wp_send_json_success( array(
+            'processed' => $processed,
+            'total'     => $total,
+            'done'      => $done,
+            'offset'    => $processed,
+        ) );
+    }
+
+    public function ajax_exclude_attachment() {
+        check_ajax_referer( self::NONCE_UNUSED_ACTION, 'nonce' );
+        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Permission denied.' ); }
+
+        $id     = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+        $action = isset( $_POST['exclude_action'] ) ? sanitize_key( $_POST['exclude_action'] ) : 'exclude';
+
+        if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+            wp_send_json_error( 'Invalid attachment.' );
+        }
+
+        if ( $action === 'unexclude' ) {
+            delete_post_meta( $id, self::META_UNUSED_STATUS );
+        } else {
+            update_post_meta( $id, self::META_UNUSED_STATUS, 'excluded' );
+        }
+
+        self::clear_unused_stats_cache();
+        wp_send_json_success( array( 'id' => $id, 'action' => $action ) );
+    }
+
+    public function ajax_bulk_trash_unused() {
+        check_ajax_referer( self::NONCE_UNUSED_ACTION, 'nonce' );
+        if ( ! current_user_can( 'delete_posts' ) ) { wp_send_json_error( 'Permission denied.' ); }
+
+        $raw_ids = isset( $_POST['ids'] ) ? (array) $_POST['ids'] : array();
+        if ( empty( $raw_ids ) ) { wp_send_json_error( 'No IDs provided.' ); }
+
+        $trashed = array(); $failed = array();
+        foreach ( $raw_ids as $raw_id ) {
+            $att_id = absint( $raw_id );
+            if ( ! $att_id || 'attachment' !== get_post_type( $att_id ) ) { $failed[] = $att_id; continue; }
+            if ( ! current_user_can( 'delete_post', $att_id ) ) { $failed[] = $att_id; continue; }
+
+            $result = wp_trash_post( $att_id );
+            if ( $result ) {
+                $trashed[] = $att_id;
+            } else {
+                $failed[] = $att_id;
+            }
+        }
+
+        self::clear_unused_stats_cache();
+        wp_send_json_success( array(
+            'trashed' => $trashed,
+            'failed'  => $failed,
+            'counts'  => array( 'trashed' => count( $trashed ), 'failed' => count( $failed ) ),
+        ) );
+    }
+
+    public function ajax_export_csv() {
+        if ( ! isset( $_GET['nonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_GET['nonce'] ) ), self::NONCE_UNUSED_ACTION ) ) {
+            wp_die( 'Security check failed.' );
+        }
+        if ( ! current_user_can( 'upload_files' ) ) { wp_die( 'Permission denied.' ); }
+
+        $confidence  = isset( $_GET['confidence'] ) ? sanitize_key( $_GET['confidence'] ) : 'all';
+        $type_filter = isset( $_GET['media_type'] ) ? sanitize_key( $_GET['media_type'] ) : 'all';
+
+        $results = $this->get_unused_attachments( array(
+            'confidence' => $confidence,
+            'type'       => $type_filter,
+            'per_page'   => 9999,
+            'page'       => 1,
+        ) );
+
+        header( 'Content-Type: text/csv; charset=UTF-8' );
+        header( 'Content-Disposition: attachment; filename="unused-media-' . gmdate( 'Y-m-d' ) . '.csv"' );
+        header( 'Pragma: no-cache' );
+
+        $out = fopen( 'php://output', 'w' );
+        fprintf( $out, chr( 0xEF ) . chr( 0xBB ) . chr( 0xBF ) ); // UTF-8 BOM for Excel
+
+        fputcsv( $out, array(
+            __( 'ID', 'uwgs-alt-text-tool' ),
+            __( 'Filename', 'uwgs-alt-text-tool' ),
+            __( 'Title', 'uwgs-alt-text-tool' ),
+            __( 'MIME Type', 'uwgs-alt-text-tool' ),
+            __( 'File Size', 'uwgs-alt-text-tool' ),
+            __( 'URL', 'uwgs-alt-text-tool' ),
+            __( 'Upload Date', 'uwgs-alt-text-tool' ),
+            __( 'Uploaded By', 'uwgs-alt-text-tool' ),
+            __( 'Confidence', 'uwgs-alt-text-tool' ),
+        ) );
+
+        foreach ( $results['attachments'] as $attachment ) {
+            $file_url  = wp_get_attachment_url( $attachment->ID );
+            $status    = get_post_meta( $attachment->ID, self::META_UNUSED_STATUS, true );
+            $file_size = get_post_meta( $attachment->ID, self::META_UNUSED_FILE_SIZE, true );
+            $author    = get_userdata( $attachment->post_author );
+
+            fputcsv( $out, array(
+                $attachment->ID,
+                $file_url ? basename( $file_url ) : '',
+                $attachment->post_title,
+                $attachment->post_mime_type,
+                $file_size ? size_format( (int) $file_size ) : '',
+                $file_url,
+                get_the_date( 'Y-m-d', $attachment->ID ),
+                $author ? $author->display_name : '',
+                $status,
+            ) );
+        }
+
+        fclose( $out );
+        exit;
+    }
+
+    public function ajax_dismiss_scan_notice() {
+        check_ajax_referer( self::NONCE_UNUSED_ACTION, 'nonce' );
+        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Permission denied.' ); }
+        update_user_meta( get_current_user_id(), '_uwgs_scan_notice_dismissed', get_option( self::OPTION_UNUSED_LAST_SCAN, 0 ) );
+        wp_send_json_success();
+    }
+
+    // =========================================================================
+    // UNUSED MEDIA: ADMIN NOTICE + STREAM
+    // =========================================================================
+
+    public function render_unused_scan_notice() {
+        if ( ! current_user_can( 'upload_files' ) ) { return; }
+        $last_scan = get_option( self::OPTION_UNUSED_LAST_SCAN, 0 );
+        if ( ! $last_scan ) { return; }
+        $dismissed = (int) get_user_meta( get_current_user_id(), '_uwgs_scan_notice_dismissed', true );
+        if ( $dismissed >= $last_scan ) { return; }
+
+        // Only show on admin pages, not on the unused media page itself
+        $screen = get_current_screen();
+        if ( $screen && $screen->id === 'media_page_uwgs-unused-media' ) { return; }
+
+        $stats  = $this->get_unused_stats();
+        $total  = $stats['unused'] + $stats['uncertain'];
+        if ( $total === 0 ) { return; }
+
+        $nonce = wp_create_nonce( self::NONCE_UNUSED_ACTION );
+        $url   = admin_url( 'upload.php?page=uwgs-unused-media' );
+        ?>
+        <div class="notice notice-warning is-dismissible" id="uwgs-scan-notice" data-nonce="<?php echo esc_attr( $nonce ); ?>">
+            <p>
+                <?php printf(
+                    esc_html__( 'Unused media scan (%1$s): %2$s items flagged as potentially unused. %3$s', 'uwgs-alt-text-tool' ),
+                    esc_html( wp_date( get_option( 'date_format' ), $last_scan ) ),
+                    '<strong>' . esc_html( number_format_i18n( $total ) ) . '</strong>',
+                    '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Review unused media →', 'uwgs-alt-text-tool' ) . '</a>'
+                ); ?>
+            </p>
+        </div>
+        <script>
+        ( function() {
+            var notice = document.getElementById( 'uwgs-scan-notice' );
+            if ( ! notice ) { return; }
+            notice.addEventListener( 'click', function( e ) {
+                if ( ! e.target.classList.contains( 'notice-dismiss' ) ) { return; }
+                var nonce = notice.dataset.nonce;
+                var fd = new FormData();
+                fd.append( 'action', 'uwgs_dismiss_scan_notice' );
+                fd.append( 'nonce', nonce );
+                fetch( <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, { method: 'POST', body: fd } );
+            } );
+        } )();
+        </script>
+        <?php
+    }
+
+    private function set_scan_notice_flags() {
+        // Reset dismissed flag for all admins so they see the notice on next login
+        global $wpdb;
+        $wpdb->delete( $wpdb->usermeta, array( 'meta_key' => '_uwgs_scan_notice_dismissed' ), array( '%s' ) );
+    }
+
+    private function log_scan_to_stream() {
+        if ( ! function_exists( 'do_action' ) ) { return; }
+        $stats   = $this->get_unused_stats();
+        $unused  = $stats['unused'];
+        $uncert  = $stats['uncertain'];
+        // Stream log entry — visible in Stream > Activity for all admins
+        do_action( 'wp_stream_log_data', null, array(
+            'connector' => 'uwgs-media-tool',
+            'message'   => sprintf(
+                /* translators: 1: unused count, 2: uncertain count */
+                __( 'Unused media scan complete: %1$d unused, %2$d uncertain', 'uwgs-alt-text-tool' ),
+                $unused, $uncert
+            ),
+            'args'      => array( 'unused' => $unused, 'uncertain' => $uncert ),
+            'object_id' => null,
+            'context'   => 'scan',
+            'action'    => 'scanned',
+        ) );
+    }
+
+    // =========================================================================
+    // UNUSED MEDIA: ADMIN ASSETS
+    // =========================================================================
+
+    private function enqueue_unused_assets() {
+        $data = array(
+            'ajaxUrl'    => admin_url( 'admin-ajax.php' ),
+            'scanNonce'  => wp_create_nonce( self::NONCE_UNUSED_SCAN ),
+            'actionNonce'=> wp_create_nonce( self::NONCE_UNUSED_ACTION ),
+            'i18n'       => array(
+                'scanning'       => __( 'Scanning…', 'uwgs-alt-text-tool' ),
+                'scanComplete'   => __( 'Scan complete. Refreshing results…', 'uwgs-alt-text-tool' ),
+                'scanError'      => __( 'Scan error. Please try again.', 'uwgs-alt-text-tool' ),
+                'trashing'       => __( 'Moving to Trash…', 'uwgs-alt-text-tool' ),
+                'trashDone'      => __( '%d items moved to Trash.', 'uwgs-alt-text-tool' ),
+                'trashError'     => __( 'Some items could not be trashed.', 'uwgs-alt-text-tool' ),
+                'confirmTrash'   => __( 'Move %d item(s) to Trash? You have 30 days to restore them.', 'uwgs-alt-text-tool' ),
+                'selectItems'    => __( 'Please select at least one item.', 'uwgs-alt-text-tool' ),
+                'excluding'      => __( 'Excluding…', 'uwgs-alt-text-tool' ),
+                'excluded'       => __( 'Item excluded from future scans.', 'uwgs-alt-text-tool' ),
+                'unexcluded'     => __( 'Exclusion removed.', 'uwgs-alt-text-tool' ),
+            ),
+        );
+
+        wp_register_script( 'uwgs-unused', plugins_url( 'js/uwgs-unused.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-unused' );
+        wp_add_inline_script( 'uwgs-unused', 'var uwgsUnusedData = ' . wp_json_encode( $data ) . ';', 'before' );
     }
 
     // =========================================================================
