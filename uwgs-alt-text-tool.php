@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.6';
+    const VERSION                = '3.1.7';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3379,12 +3379,13 @@ JS;
             if ( $token ) { return $token; }
             return 'DECRYPT_FAIL:uid=' . $uid . ',key=' . $row->meta_key . ',val_len=' . strlen( $row->meta_value );
         }
-        // None of the admins had a token — report actual keys stored for current user.
-        $keys = $wpdb->get_col( $wpdb->prepare(
-            "SELECT meta_key FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key LIKE %s",
-            $current ?: ( $users[0] ?? 0 ), '%googlesitekit%'
-        ) );
-        return 'DEBUG:no_token_found,uid=' . $current . ',sk_keys=' . implode( '|', $keys );
+        // None of the admins had a token — find which user(s) actually have SK meta.
+        $rows = $wpdb->get_results(
+            "SELECT user_id, meta_key FROM {$wpdb->usermeta} WHERE meta_key LIKE '%googlesitekit_access_token' LIMIT 10"
+        );
+        $found = array();
+        foreach ( (array) $rows as $r ) { $found[] = 'uid=' . $r->user_id . ':' . $r->meta_key; }
+        return 'DEBUG:no_token_found,admins=[' . implode( ',', array_map( 'intval', $users ) ) . '],sk_token_users=[' . implode( '|', $found ) . ']';
     }
 
     private function decrypt_site_kit_value( $raw_value ) {
