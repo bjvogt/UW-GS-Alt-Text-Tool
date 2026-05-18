@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.4';
+    const VERSION                = '3.1.5';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3363,11 +3363,15 @@ JS;
             // Site Kit uses get_user_option() which applies the blog DB prefix on single-site.
             $expires_in = (int) get_user_option( 'googlesitekit_access_token_expires_in', $uid );
             $created_at = (int) get_user_option( 'googlesitekit_access_token_created_at', $uid );
-            if ( $created_at && $created_at + $expires_in - 60 < time() ) { continue; } // expired
-            $encrypted = get_user_option( 'googlesitekit_access_token', $uid );
+            $encrypted  = get_user_option( 'googlesitekit_access_token', $uid );
             if ( ! $encrypted ) { continue; }
+            if ( $created_at && $created_at + $expires_in - 60 < time() ) {
+                // Token is expired — try to return a debug hint rather than silently skipping.
+                return 'EXPIRED:' . $uid . ':' . $created_at . ':' . ( $created_at + $expires_in ) . ':now=' . time();
+            }
             $token = $this->decrypt_site_kit_value( $encrypted );
             if ( $token ) { return $token; }
+            return 'DECRYPT_FAIL:uid=' . $uid;
         }
         return null;
     }
@@ -3394,12 +3398,13 @@ JS;
     private function get_ga4_access_token() {
         // Prefer Site Kit's live OAuth token — no service account needed.
         $site_kit_token = $this->get_site_kit_access_token();
-        if ( $site_kit_token ) { return $site_kit_token; }
+        if ( $site_kit_token && strpos( $site_kit_token, ':' ) === false ) { return $site_kit_token; }
 
         // Fall back to configured service account.
         $json = $this->get_service_account_json();
         if ( empty( $json ) ) {
-            return new WP_Error( 'no_credentials', __( 'No credentials available. Connect Google Site Kit or configure a service account.', 'uwgs-alt-text-tool' ) );
+            $debug = $site_kit_token ? ' [debug: ' . $site_kit_token . ']' : ' [debug: no SK token found]';
+            return new WP_Error( 'no_credentials', __( 'No credentials available. Connect Google Site Kit or configure a service account.', 'uwgs-alt-text-tool' ) . $debug );
         }
         $creds = json_decode( $json, true );
         if ( ! is_array( $creds ) || empty( $creds['client_email'] ) || empty( $creds['private_key'] ) ) {
