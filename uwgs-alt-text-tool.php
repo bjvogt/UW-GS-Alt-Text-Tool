@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.7';
+    const VERSION                = '3.1.8';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3352,40 +3352,26 @@ JS;
 
     private function get_site_kit_access_token() {
         global $wpdb;
-        $users   = get_users( array( 'role__in' => array( 'administrator' ), 'number' => -1, 'fields' => 'ID' ) );
+        // Search all users for a Site Kit access token — the connected user may not have
+        // the administrator role (e.g. Pantheon machine user). Prefer current user first.
         $current = get_current_user_id();
-        if ( $current && in_array( $current, $users, false ) ) {
-            array_unshift( $users, $current );
-            $users = array_unique( $users );
-        }
-        if ( empty( $users ) ) { return 'DEBUG:no_admin_users'; }
-        foreach ( $users as $uid ) {
-            $uid = (int) $uid;
-            // Find actual Site Kit token meta key for this user (handles any prefix variant).
-            $row = $wpdb->get_row( $wpdb->prepare(
-                "SELECT meta_key, meta_value FROM {$wpdb->usermeta}
-                 WHERE user_id = %d AND meta_key LIKE %s LIMIT 1",
-                $uid, '%googlesitekit_access_token'
-            ) );
-            if ( ! $row ) { continue; }
-            // Check expiry using the same meta_key prefix we just discovered.
-            $prefix       = str_replace( 'googlesitekit_access_token', '', $row->meta_key );
-            $expires_in   = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_expires_in', true );
-            $created_at   = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_created_at', true );
-            if ( $created_at && $created_at + $expires_in - 60 < time() ) {
-                return 'EXPIRED:uid=' . $uid . ',created=' . $created_at . ',expires=' . ( $created_at + $expires_in ) . ',now=' . time() . ',key=' . $row->meta_key;
-            }
+        $rows    = $wpdb->get_results(
+            "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta}
+             WHERE meta_key LIKE '%googlesitekit_access_token'
+             ORDER BY FIELD(user_id, " . (int) $current . ") DESC, umeta_id DESC
+             LIMIT 10"
+        );
+        if ( empty( $rows ) ) { return null; }
+        foreach ( $rows as $row ) {
+            $uid    = (int) $row->user_id;
+            $prefix = str_replace( 'googlesitekit_access_token', '', $row->meta_key );
+            $expires_in = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_expires_in', true );
+            $created_at = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_created_at', true );
+            if ( $created_at && $created_at + $expires_in - 60 < time() ) { continue; } // expired
             $token = $this->decrypt_site_kit_value( $row->meta_value );
             if ( $token ) { return $token; }
-            return 'DECRYPT_FAIL:uid=' . $uid . ',key=' . $row->meta_key . ',val_len=' . strlen( $row->meta_value );
         }
-        // None of the admins had a token — find which user(s) actually have SK meta.
-        $rows = $wpdb->get_results(
-            "SELECT user_id, meta_key FROM {$wpdb->usermeta} WHERE meta_key LIKE '%googlesitekit_access_token' LIMIT 10"
-        );
-        $found = array();
-        foreach ( (array) $rows as $r ) { $found[] = 'uid=' . $r->user_id . ':' . $r->meta_key; }
-        return 'DEBUG:no_token_found,admins=[' . implode( ',', array_map( 'intval', $users ) ) . '],sk_token_users=[' . implode( '|', $found ) . ']';
+        return null;
     }
 
     private function decrypt_site_kit_value( $raw_value ) {
@@ -3410,13 +3396,12 @@ JS;
     private function get_ga4_access_token() {
         // Prefer Site Kit's live OAuth token — no service account needed.
         $site_kit_token = $this->get_site_kit_access_token();
-        if ( $site_kit_token && strpos( $site_kit_token, ':' ) === false ) { return $site_kit_token; }
+        if ( $site_kit_token ) { return $site_kit_token; }
 
         // Fall back to configured service account.
         $json = $this->get_service_account_json();
         if ( empty( $json ) ) {
-            $debug = $site_kit_token ? ' [debug: ' . $site_kit_token . ']' : ' [debug: no SK token found]';
-            return new WP_Error( 'no_credentials', __( 'No credentials available. Connect Google Site Kit or configure a service account.', 'uwgs-alt-text-tool' ) . $debug );
+            return new WP_Error( 'no_credentials', __( 'No credentials available. Connect Google Site Kit or configure a service account.', 'uwgs-alt-text-tool' ) );
         }
         $creds = json_decode( $json, true );
         if ( ! is_array( $creds ) || empty( $creds['client_email'] ) || empty( $creds['private_key'] ) ) {
