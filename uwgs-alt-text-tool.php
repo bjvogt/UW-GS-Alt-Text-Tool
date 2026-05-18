@@ -2501,9 +2501,135 @@ JS;
         return array_unique( $references );
     }
 
-    private function scan_attachment_status( $id, array $theme_index ) {
+    /**
+     * Build an inverted in-use index from 4 bulk queries so per-attachment
+     * lookup is O(1) PHP array access instead of per-attachment SQL.
+     *
+     * Runs once per full scan (offset=0) and is cached as a transient.
+     *
+     * Returns array with keys:
+     *   active_paths, active_filenames, active_ids  — found in live content
+     *   trash_paths,  trash_filenames,  trash_ids   — found only in trash
+     *   meta_ids, meta_paths, meta_filenames        — found in postmeta
+     *   option_paths, option_filenames              — found in autoloaded options
+     */
+    private function build_in_use_index() {
         global $wpdb;
 
+        $idx = array(
+            'active_paths'     => array(),
+            'active_filenames' => array(),
+            'active_ids'       => array(),
+            'trash_paths'      => array(),
+            'trash_filenames'  => array(),
+            'trash_ids'        => array(),
+            'meta_ids'         => array(),
+            'meta_paths'       => array(),
+            'meta_filenames'   => array(),
+            'option_paths'     => array(),
+            'option_filenames' => array(),
+        );
+
+        // Helper: extract path fragment and basename from a raw /uploads/… match.
+        $add_ref = function( $raw_path, array &$paths, array &$filenames ) {
+            $path = trim( $raw_path, '"\'()[]{}< >,' );
+            // Strip query string / fragment
+            $path = preg_replace( '/[?#].*$/', '', $path );
+            if ( strlen( $path ) < 3 ) { return; }
+            $paths[ $path ]                  = true;
+            $filenames[ basename( $path ) ]  = true;
+        };
+
+        // --- 1. Post content: live posts and trashed posts -------------------------
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+        $rows = $wpdb->get_results(
+            "SELECT post_content, post_status
+             FROM {$wpdb->posts}
+             WHERE post_type != 'attachment'
+               AND post_status NOT IN ('auto-draft')
+               AND ( post_content LIKE '%/uploads/%'
+                  OR post_content LIKE '%\"id\":%' )"
+        );
+        foreach ( (array) $rows as $row ) {
+            $is_trash = ( $row->post_status === 'trash' );
+
+            // Path references
+            if ( preg_match_all( '#/uploads/([^\s\'")\]>\\\\]+)#', $row->post_content, $m ) ) {
+                $path_bucket = $is_trash ? 'trash_paths' : 'active_paths';
+                $file_bucket = $is_trash ? 'trash_filenames' : 'active_filenames';
+                foreach ( $m[1] as $raw ) {
+                    $add_ref( $raw, $idx[ $path_bucket ], $idx[ $file_bucket ] );
+                }
+            }
+
+            // Gutenberg block "id": NNN references
+            if ( preg_match_all( '#"id"\s*:\s*(\d+)#', $row->post_content, $m ) ) {
+                $id_bucket = $is_trash ? 'trash_ids' : 'active_ids';
+                foreach ( $m[1] as $att_id ) {
+                    $idx[ $id_bucket ][ (int) $att_id ] = true;
+                }
+            }
+        }
+
+        // --- 2. Postmeta ----------------------------------------------------------
+
+        // 2a. Exact numeric meta_value matches (featured images, etc.)
+        //     Intersect all numeric meta values with actual attachment IDs to
+        //     avoid false positives from coincidental integers.
+        $att_ids = $wpdb->get_col(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_type = 'attachment' AND post_status = 'inherit'"
+        );
+        $att_ids_set = array_flip( array_map( 'intval', (array) $att_ids ) );
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+        $numeric_meta = $wpdb->get_col(
+            "SELECT DISTINCT meta_value FROM {$wpdb->postmeta}
+             WHERE meta_value REGEXP '^[0-9]+$'"
+        );
+        foreach ( (array) $numeric_meta as $v ) {
+            $n = (int) $v;
+            if ( $n > 0 && isset( $att_ids_set[ $n ] ) ) {
+                $idx['meta_ids'][ $n ] = true;
+            }
+        }
+
+        // 2b. Meta values containing upload paths (ACF, page builder, serialized data)
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+        $meta_vals = $wpdb->get_col(
+            "SELECT meta_value FROM {$wpdb->postmeta}
+             WHERE meta_value LIKE '%/uploads/%'"
+        );
+        foreach ( (array) $meta_vals as $val ) {
+            if ( preg_match_all( '#/uploads/([^\s\'")\]>\\\\]+)#', $val, $m ) ) {
+                foreach ( $m[1] as $raw ) {
+                    $add_ref( $raw, $idx['meta_paths'], $idx['meta_filenames'] );
+                }
+            }
+        }
+
+        // --- 3. Autoloaded options (widgets, customizer, theme mods) ---------------
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery
+        $opt_vals = $wpdb->get_col(
+            "SELECT option_value FROM {$wpdb->options}
+             WHERE autoload = 'yes' AND option_value LIKE '%/uploads/%'"
+        );
+        foreach ( (array) $opt_vals as $val ) {
+            if ( preg_match_all( '#/uploads/([^\s\'")\]>\\\\]+)#', $val, $m ) ) {
+                foreach ( $m[1] as $raw ) {
+                    $add_ref( $raw, $idx['option_paths'], $idx['option_filenames'] );
+                }
+            }
+        }
+
+        return $idx;
+    }
+
+    /**
+     * Classify one attachment using pre-built in-use and theme indexes.
+     * All lookups are O(1) PHP array access — no SQL queries here.
+     */
+    private function scan_attachment_status( $id, array $in_use_index, array $theme_index ) {
         $url = wp_get_attachment_url( $id );
         if ( ! $url ) { return 'in_use'; }
 
@@ -2511,56 +2637,33 @@ JS;
         $rel_path   = ltrim( str_replace( $upload_dir['baseurl'], '', $url ), '/' );
         if ( empty( $rel_path ) ) { return 'in_use'; }
 
-        $filename   = basename( $rel_path );
-        $like_path  = '%' . $wpdb->esc_like( $rel_path ) . '%';
-        $like_fname = '%' . $wpdb->esc_like( $filename ) . '%';
-        $id_str     = (string) $id;
+        $filename = basename( $rel_path );
 
-        // 1. post_content — published/draft (not trash, not auto-draft, not attachments)
-        $in_content = (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->posts}
-             WHERE post_type != 'attachment'
-               AND post_status NOT IN ('trash','auto-draft')
-               AND ( post_content LIKE %s
-                  OR post_content LIKE %s
-                  OR post_content LIKE %s )",
-            $like_path,
-            '%"id":' . $id . '%',
-            '%"id": ' . $id . '%'
-        ) );
-        if ( $in_content > 0 ) { return 'in_use'; }
+        // 1. Active post content
+        if ( isset( $in_use_index['active_paths'][ $rel_path ] ) )        { return 'in_use'; }
+        if ( isset( $in_use_index['active_filenames'][ $filename ] ) )     { return 'in_use'; }
+        if ( isset( $in_use_index['active_ids'][ $id ] ) )                 { return 'in_use'; }
 
-        // Check trashed content separately (for uncertain status)
-        $in_trash_content = (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->posts}
-             WHERE post_type != 'attachment' AND post_status = 'trash'
-               AND ( post_content LIKE %s OR post_content LIKE %s OR post_content LIKE %s )",
-            $like_path, '%"id":' . $id . '%', '%"id": ' . $id . '%'
-        ) );
+        // 2. Postmeta
+        if ( isset( $in_use_index['meta_ids'][ $id ] ) )                   { return 'in_use'; }
+        if ( isset( $in_use_index['meta_paths'][ $rel_path ] ) )           { return 'in_use'; }
+        if ( isset( $in_use_index['meta_filenames'][ $filename ] ) )       { return 'in_use'; }
 
-        // 2. postmeta — featured images (exact ID), ACF/custom fields, serialized data
-        $in_meta = (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->postmeta}
-             WHERE meta_value = %s OR meta_value LIKE %s",
-            $id_str, $like_fname
-        ) );
-        if ( $in_meta > 0 ) { return 'in_use'; }
+        // 3. Autoloaded options
+        if ( isset( $in_use_index['option_paths'][ $rel_path ] ) )         { return 'in_use'; }
+        if ( isset( $in_use_index['option_filenames'][ $filename ] ) )     { return 'in_use'; }
 
-        // 3. wp_options — widgets, customizer, theme mods (autoloaded only for performance)
-        $in_options = (int) $wpdb->get_var( $wpdb->prepare(
-            "SELECT COUNT(*) FROM {$wpdb->options}
-             WHERE autoload = 'yes' AND option_value LIKE %s",
-            $like_fname
-        ) );
-        if ( $in_options > 0 ) { return 'in_use'; }
-
-        // 4. Theme files index
+        // 4. Theme files (small list, loop is fine)
         foreach ( $theme_index as $ref ) {
-            if ( strpos( $ref, $filename ) !== false ) { return 'in_use'; }
+            if ( strpos( $ref, $filename ) !== false || strpos( $ref, $rel_path ) !== false ) {
+                return 'in_use';
+            }
         }
 
-        // Found only in trash → uncertain
-        if ( $in_trash_content > 0 ) { return 'uncertain'; }
+        // Found only in trashed content → uncertain
+        if ( isset( $in_use_index['trash_paths'][ $rel_path ] ) )          { return 'uncertain'; }
+        if ( isset( $in_use_index['trash_filenames'][ $filename ] ) )      { return 'uncertain'; }
+        if ( isset( $in_use_index['trash_ids'][ $id ] ) )                  { return 'uncertain'; }
 
         return 'unused';
     }
@@ -2576,12 +2679,19 @@ JS;
         $offset     = isset( $_POST['offset'] ) ? absint( $_POST['offset'] ) : 0;
         $batch_size = 50;
 
-        // Build theme index once at the start of each full scan
+        // Build both indexes once at the start of the scan; load from transient on later batches.
         if ( $offset === 0 ) {
-            $theme_index = $this->build_theme_index();
-            set_transient( 'uwgs_theme_index', $theme_index, HOUR_IN_SECONDS );
+            $in_use_index = $this->build_in_use_index();
+            $theme_index  = $this->build_theme_index();
+            set_transient( 'uwgs_in_use_index', $in_use_index, HOUR_IN_SECONDS );
+            set_transient( 'uwgs_theme_index',  $theme_index,  HOUR_IN_SECONDS );
         } else {
-            $theme_index = get_transient( 'uwgs_theme_index' );
+            $in_use_index = get_transient( 'uwgs_in_use_index' );
+            $theme_index  = get_transient( 'uwgs_theme_index' );
+            if ( false === $in_use_index ) {
+                $in_use_index = $this->build_in_use_index();
+                set_transient( 'uwgs_in_use_index', $in_use_index, HOUR_IN_SECONDS );
+            }
             if ( false === $theme_index ) {
                 $theme_index = $this->build_theme_index();
                 set_transient( 'uwgs_theme_index', $theme_index, HOUR_IN_SECONDS );
@@ -2613,7 +2723,7 @@ JS;
             $current = get_post_meta( $att_id, self::META_UNUSED_STATUS, true );
             if ( $current === 'excluded' ) { continue; }
 
-            $status = $this->scan_attachment_status( $att_id, $theme_index );
+            $status = $this->scan_attachment_status( $att_id, $in_use_index, $theme_index );
             update_post_meta( $att_id, self::META_UNUSED_STATUS, $status );
 
             // Cache file size during scan so we don't re-stat later
@@ -2628,6 +2738,7 @@ JS;
 
         if ( $done ) {
             update_option( self::OPTION_UNUSED_LAST_SCAN, time() );
+            delete_transient( 'uwgs_in_use_index' );
             delete_transient( 'uwgs_theme_index' );
             self::clear_unused_stats_cache();
             $this->log_scan_to_stream();
