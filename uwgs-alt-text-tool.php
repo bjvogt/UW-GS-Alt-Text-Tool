@@ -222,6 +222,9 @@ class UWGS_Alt_Text_Tool {
         add_action( 'wp_ajax_uwgs_export_csv',         array( $this, 'ajax_export_csv' ) );
         add_action( 'wp_ajax_uwgs_dismiss_scan_notice',array( $this, 'ajax_dismiss_scan_notice' ) );
         add_action( 'admin_notices',                   array( $this, 'render_unused_scan_notice' ) );
+        add_filter( 'set_screen_option_uwgs_unused_per_page', function( $status, $option, $value ) {
+            return max( 1, (int) $value );
+        }, 10, 3 );
     }
 
     // =========================================================================
@@ -2156,7 +2159,7 @@ JS;
 
     public function register_unused_media_page() {
         if ( ! current_user_can( 'upload_files' ) ) { return; }
-        add_submenu_page(
+        $hook = add_submenu_page(
             'upload.php',
             __( 'Unused Media', 'uwgs-alt-text-tool' ),
             __( 'Unused Media', 'uwgs-alt-text-tool' ),
@@ -2164,6 +2167,15 @@ JS;
             'uwgs-unused-media',
             array( $this, 'render_unused_media_page' )
         );
+        add_action( "load-{$hook}", array( $this, 'unused_media_screen_options' ) );
+    }
+
+    public function unused_media_screen_options() {
+        add_screen_option( 'per_page', array(
+            'label'   => __( 'Items per page', 'uwgs-alt-text-tool' ),
+            'default' => 50,
+            'option'  => 'uwgs_unused_per_page',
+        ) );
     }
 
     public function render_unused_media_page() {
@@ -2173,13 +2185,20 @@ JS;
         $confidence  = isset( $_GET['confidence'] ) ? sanitize_key( $_GET['confidence'] ) : 'all';
         $type_filter = isset( $_GET['media_type'] ) ? sanitize_key( $_GET['media_type'] ) : 'all';
         $paged       = isset( $_GET['paged'] ) ? max( 1, absint( $_GET['paged'] ) ) : 1;
-        $per_page    = 50;
+        $per_page    = (int) get_user_option( 'uwgs_unused_per_page' );
+        if ( $per_page < 1 ) { $per_page = 50; }
+
+        $allowed_orderby = array( 'date', 'author', 'type', 'size', 'confidence' );
+        $orderby         = isset( $_GET['orderby'] ) && in_array( $_GET['orderby'], $allowed_orderby, true ) ? $_GET['orderby'] : 'date';
+        $order           = isset( $_GET['order'] ) && strtoupper( $_GET['order'] ) === 'ASC' ? 'ASC' : 'DESC';
 
         $results = $this->get_unused_attachments( array(
             'confidence' => $confidence,
             'type'       => $type_filter,
             'per_page'   => $per_page,
             'page'       => $paged,
+            'orderby'    => $orderby,
+            'order'      => $order,
         ) );
 
         $attachments = $results['attachments'];
@@ -2194,13 +2213,13 @@ JS;
         $scan_stale = $last_scan && ( time() - $last_scan ) > 7 * DAY_IN_SECONDS;
         ?>
         <div class="wrap" id="uwgs-unused-wrap">
-            <h1 class="wp-heading-inline"><?php esc_html_e( 'Unused Media', 'uwgs-alt-text-tool' ); ?></h1>
-            <span style="margin-left:12px;">
+            <h1><?php esc_html_e( 'Unused Media', 'uwgs-alt-text-tool' ); ?></h1>
+            <div style="margin-bottom:12px;">
                 <button type="button" id="uwgs-rescan-btn" class="button"
                         data-nonce="<?php echo esc_attr( $scan_nonce ); ?>">
                     &#9654; <?php esc_html_e( 'Rescan', 'uwgs-alt-text-tool' ); ?>
                 </button>
-            </span>
+            </div>
 
             <?php if ( $scan_stale ) : ?>
                 <div class="notice notice-warning inline" style="margin:8px 0;">
@@ -2287,28 +2306,65 @@ JS;
                 </p>
             <?php else : ?>
 
+                <?php
+                // Helper: render a sortable column header link.
+                $sort_header = function( $col_key, $label, $width = '' ) use ( $orderby, $order, $base_url, $confidence, $type_filter, $paged ) {
+                    $is_active   = ( $orderby === $col_key );
+                    $next_order  = ( $is_active && $order === 'DESC' ) ? 'ASC' : 'DESC';
+                    $arrow       = $is_active ? ( $order === 'DESC' ? ' &#8595;' : ' &#8593;' ) : '';
+                    $url         = add_query_arg( array(
+                        'orderby'    => $col_key,
+                        'order'      => $next_order,
+                        'confidence' => $confidence,
+                        'media_type' => $type_filter,
+                        'paged'      => 1,
+                    ), $base_url );
+                    $style       = $width ? ' style="width:' . esc_attr( $width ) . ';"' : '';
+                    $class       = $is_active ? ' sorted ' . strtolower( $order ) : ' sortable desc';
+                    echo '<th scope="col"' . $style . ' class="column-' . esc_attr( $col_key ) . $class . '">'
+                        . '<a href="' . esc_url( $url ) . '"><span>' . esc_html( $label ) . '</span>'
+                        . '<span class="sorting-indicator">' . $arrow . '</span></a></th>';
+                };
+
+                $first_item  = ( ( $paged - 1 ) * $per_page ) + 1;
+                $last_item   = min( $paged * $per_page, $total );
+                ?>
                 <form method="post" id="uwgs-unused-form">
                     <?php wp_nonce_field( self::NONCE_UNUSED_ACTION, 'uwgs_unused_nonce' ); ?>
-                    <div class="tablenav top" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                        <select id="uwgs-bulk-action" name="bulk_action">
-                            <option value=""><?php esc_html_e( 'Bulk actions', 'uwgs-alt-text-tool' ); ?></option>
-                            <option value="trash"><?php esc_html_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?></option>
-                        </select>
-                        <button type="button" id="uwgs-bulk-apply" class="button"><?php esc_html_e( 'Apply', 'uwgs-alt-text-tool' ); ?></button>
-                        <span id="uwgs-bulk-feedback" style="font-size:12px;color:#555;"></span>
+                    <div class="tablenav top">
+                        <div class="alignleft actions bulkactions">
+                            <select id="uwgs-bulk-action" name="bulk_action">
+                                <option value=""><?php esc_html_e( 'Bulk actions', 'uwgs-alt-text-tool' ); ?></option>
+                                <option value="trash"><?php esc_html_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?></option>
+                            </select>
+                            <button type="button" id="uwgs-bulk-apply" class="button"><?php esc_html_e( 'Apply', 'uwgs-alt-text-tool' ); ?></button>
+                            <span id="uwgs-bulk-feedback" style="font-size:12px;color:#555;margin-left:8px;"></span>
+                        </div>
+                        <div class="tablenav-pages" style="float:right;line-height:2;">
+                            <span class="displaying-num">
+                                <?php echo esc_html( sprintf(
+                                    /* translators: 1: first item number, 2: last item number, 3: total */
+                                    _n( '%2$s of %3$s item', '%1$s–%2$s of %3$s items', $total, 'uwgs-alt-text-tool' ),
+                                    number_format_i18n( $first_item ),
+                                    number_format_i18n( $last_item ),
+                                    number_format_i18n( $total )
+                                ) ); ?>
+                            </span>
+                        </div>
+                        <br class="clear">
                     </div>
 
                     <table class="wp-list-table widefat fixed striped" id="uwgs-unused-table">
                         <thead><tr>
-                            <td class="check-column"><input type="checkbox" id="uwgs-select-all" aria-label="<?php esc_attr_e( 'Select all', 'uwgs-alt-text-tool' ); ?>"></td>
-                            <th style="width:60px;"><?php esc_html_e( 'Preview', 'uwgs-alt-text-tool' ); ?></th>
-                            <th><?php esc_html_e( 'File', 'uwgs-alt-text-tool' ); ?></th>
-                            <th style="width:80px;"><?php esc_html_e( 'Type', 'uwgs-alt-text-tool' ); ?></th>
-                            <th style="width:70px;"><?php esc_html_e( 'Size', 'uwgs-alt-text-tool' ); ?></th>
-                            <th style="width:100px;"><?php esc_html_e( 'Uploaded', 'uwgs-alt-text-tool' ); ?></th>
-                            <th style="width:100px;"><?php esc_html_e( 'By', 'uwgs-alt-text-tool' ); ?></th>
-                            <th style="width:110px;"><?php esc_html_e( 'Confidence', 'uwgs-alt-text-tool' ); ?></th>
-                            <th style="width:120px;"><?php esc_html_e( 'Actions', 'uwgs-alt-text-tool' ); ?></th>
+                            <td class="manage-column column-cb check-column"><input type="checkbox" id="uwgs-select-all" aria-label="<?php esc_attr_e( 'Select all', 'uwgs-alt-text-tool' ); ?>"></td>
+                            <th scope="col" style="width:60px;"><?php esc_html_e( 'Preview', 'uwgs-alt-text-tool' ); ?></th>
+                            <th scope="col"><?php esc_html_e( 'File', 'uwgs-alt-text-tool' ); ?></th>
+                            <?php $sort_header( 'type',       __( 'Type',       'uwgs-alt-text-tool' ), '80px' ); ?>
+                            <?php $sort_header( 'size',       __( 'Size',       'uwgs-alt-text-tool' ), '70px' ); ?>
+                            <?php $sort_header( 'date',       __( 'Uploaded',   'uwgs-alt-text-tool' ), '100px' ); ?>
+                            <?php $sort_header( 'author',     __( 'By',         'uwgs-alt-text-tool' ), '100px' ); ?>
+                            <?php $sort_header( 'confidence', __( 'Confidence', 'uwgs-alt-text-tool' ), '110px' ); ?>
+                            <th scope="col" style="width:120px;"><?php esc_html_e( 'Actions', 'uwgs-alt-text-tool' ); ?></th>
                         </tr></thead>
                         <tbody>
                         <?php foreach ( $attachments as $attachment ) :
@@ -2330,8 +2386,8 @@ JS;
                             $author    = get_userdata( $attachment->post_author );
                             $author_name = $author ? $author->display_name : '—';
                             $conf_label = $status === 'unused'
-                                ? '<span style="color:#c62828;font-weight:600;" title="' . esc_attr__( 'No reference found anywhere in content, metadata, options, or theme files', 'uwgs-alt-text-tool' ) . '">&bull; ' . esc_html__( 'Unused', 'uwgs-alt-text-tool' ) . '</span>'
-                                : '<span style="color:#856404;font-weight:600;" title="' . esc_attr__( 'Found only in trashed content — may be safely removable', 'uwgs-alt-text-tool' ) . '">&#9670; ' . esc_html__( 'Uncertain', 'uwgs-alt-text-tool' ) . '</span>';
+                                ? '<span style="color:#c62828;font-weight:600;" title="' . esc_attr__( 'No reference found anywhere in content, metadata, options, or theme files', 'uwgs-alt-text-tool' ) . '">' . esc_html__( 'Unused', 'uwgs-alt-text-tool' ) . '</span>'
+                                : '<span style="color:#856404;font-weight:600;" title="' . esc_attr__( 'Found only in trashed content — may be safely removable', 'uwgs-alt-text-tool' ) . '">' . esc_html__( 'Uncertain', 'uwgs-alt-text-tool' ) . '</span>';
                         ?>
                             <tr data-id="<?php echo esc_attr( $attachment->ID ); ?>">
                                 <th class="check-column"><input type="checkbox" name="attachment_ids[]" value="<?php echo esc_attr( $attachment->ID ); ?>"></th>
@@ -2358,39 +2414,58 @@ JS;
                                 <td style="font-size:12px;"><?php echo esc_html( $author_name ); ?></td>
                                 <td><?php echo $conf_label; ?></td>
                                 <td>
-                                    <button type="button" class="button button-small uwgs-exclude-btn"
-                                            data-id="<?php echo esc_attr( $attachment->ID ); ?>"
-                                            data-nonce="<?php echo esc_attr( $action_nonce ); ?>"
-                                            title="<?php esc_attr_e( 'Keep this item — exclude from future scans', 'uwgs-alt-text-tool' ); ?>">
-                                        <?php esc_html_e( 'Keep', 'uwgs-alt-text-tool' ); ?>
-                                    </button>
-                                    <button type="button" class="button button-small uwgs-trash-single-btn"
-                                            data-id="<?php echo esc_attr( $attachment->ID ); ?>"
-                                            data-nonce="<?php echo esc_attr( $action_nonce ); ?>"
-                                            style="margin-top:4px;color:#b32d2e;border-color:#b32d2e;"
-                                            title="<?php esc_attr_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?>">
-                                        <?php esc_html_e( 'Trash', 'uwgs-alt-text-tool' ); ?>
-                                    </button>
+                                    <div style="display:flex;gap:4px;align-items:center;">
+                                        <button type="button" class="button button-small uwgs-exclude-btn"
+                                                data-id="<?php echo esc_attr( $attachment->ID ); ?>"
+                                                data-nonce="<?php echo esc_attr( $action_nonce ); ?>"
+                                                title="<?php esc_attr_e( 'Keep this item — exclude from future scans', 'uwgs-alt-text-tool' ); ?>">
+                                            <?php esc_html_e( 'Keep', 'uwgs-alt-text-tool' ); ?>
+                                        </button>
+                                        <button type="button" class="button button-small uwgs-trash-single-btn"
+                                                data-id="<?php echo esc_attr( $attachment->ID ); ?>"
+                                                data-nonce="<?php echo esc_attr( $action_nonce ); ?>"
+                                                style="color:#b32d2e;border-color:#b32d2e;"
+                                                title="<?php esc_attr_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?>">
+                                            <?php esc_html_e( 'Trash', 'uwgs-alt-text-tool' ); ?>
+                                        </button>
+                                    </div>
                                 </td>
                             </tr>
                         <?php endforeach; ?>
                         </tbody>
                     </table>
 
-                    <?php if ( $total_pages > 1 ) : ?>
-                        <div class="tablenav bottom" style="margin-top:12px;">
-                            <?php
-                            $pagination_args = array(
-                                'base'    => add_query_arg( 'paged', '%#%', $base_url ),
-                                'format'  => '',
-                                'current' => $paged,
-                                'total'   => $total_pages,
-                                'add_args' => array( 'confidence' => $confidence, 'media_type' => $type_filter ),
-                            );
-                            echo paginate_links( $pagination_args );
-                            ?>
-                        </div>
-                    <?php endif; ?>
+                    <div class="tablenav bottom" style="margin-top:8px;">
+                        <?php if ( $total_pages > 1 ) : ?>
+                            <div class="tablenav-pages">
+                                <span class="displaying-num">
+                                    <?php echo esc_html( sprintf(
+                                        _n( '%2$s of %3$s item', '%1$s–%2$s of %3$s items', $total, 'uwgs-alt-text-tool' ),
+                                        number_format_i18n( $first_item ),
+                                        number_format_i18n( $last_item ),
+                                        number_format_i18n( $total )
+                                    ) ); ?>
+                                </span>
+                                <?php
+                                echo paginate_links( array(
+                                    'base'     => add_query_arg( 'paged', '%#%', $base_url ),
+                                    'format'   => '',
+                                    'current'  => $paged,
+                                    'total'    => $total_pages,
+                                    'add_args' => array(
+                                        'confidence' => $confidence,
+                                        'media_type' => $type_filter,
+                                        'orderby'    => $orderby,
+                                        'order'      => $order,
+                                    ),
+                                    'prev_text' => '&laquo;',
+                                    'next_text' => '&raquo;',
+                                ) );
+                                ?>
+                            </div>
+                        <?php endif; ?>
+                        <br class="clear">
+                    </div>
 
                     <div id="uwgs-trash-confirm-dialog" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:99999;align-items:center;justify-content:center;">
                         <div style="background:#fff;border-radius:4px;padding:24px;max-width:420px;width:90%;box-shadow:0 8px 24px rgba(0,0,0,0.2);" role="alertdialog" aria-labelledby="uwgs-trash-confirm-title" aria-modal="true">
@@ -2424,19 +2499,50 @@ JS;
         if ( $args['confidence'] === 'unused' )    { $status_values = array( 'unused' ); }
         if ( $args['confidence'] === 'uncertain' ) { $status_values = array( 'uncertain' ); }
 
+        $meta_query = array(
+            'status_clause' => array(
+                'key'     => self::META_UNUSED_STATUS,
+                'value'   => $status_values,
+                'compare' => 'IN',
+            ),
+        );
+
         $query_args = array(
             'post_type'      => 'attachment',
             'post_status'    => 'inherit',
             'posts_per_page' => $args['per_page'],
             'paged'          => $args['page'],
-            'orderby'        => 'date',
             'order'          => $args['order'],
-            'meta_query'     => array( array(
-                'key'     => self::META_UNUSED_STATUS,
-                'value'   => $status_values,
-                'compare' => 'IN',
-            ) ),
+            'meta_query'     => $meta_query,
         );
+
+        // Map orderby param to WP_Query equivalents.
+        switch ( $args['orderby'] ) {
+            case 'author':
+                $query_args['orderby'] = 'author';
+                break;
+            case 'size':
+                // Order by file-size meta stored during scan; use named meta clause.
+                $query_args['meta_query']['size_clause'] = array(
+                    'key'     => self::META_UNUSED_FILE_SIZE,
+                    'type'    => 'NUMERIC',
+                    'compare' => 'EXISTS',
+                );
+                $query_args['orderby'] = array( 'size_clause' => $args['order'] );
+                unset( $query_args['order'] );
+                break;
+            case 'confidence':
+                // Order alphabetically by status meta value (uncertain > unused).
+                $query_args['orderby']  = 'status_clause';
+                break;
+            case 'type':
+                // post_mime_type is not a native WP_Query orderby; handled via filter below.
+                $query_args['orderby'] = 'date'; // fallback, overridden by filter
+                break;
+            default: // 'date'
+                $query_args['orderby'] = 'date';
+                break;
+        }
 
         if ( $args['type'] !== 'all' ) {
             switch ( $args['type'] ) {
@@ -2457,7 +2563,19 @@ JS;
             }
         }
 
-        $query = new WP_Query( $query_args );
+        if ( $args['orderby'] === 'type' ) {
+            global $wpdb;
+            $sql_order = $args['order'];
+            $mime_filter = function( $orderby ) use ( $wpdb, $sql_order ) {
+                return "{$wpdb->posts}.post_mime_type {$sql_order}";
+            };
+            add_filter( 'posts_orderby', $mime_filter );
+            $query = new WP_Query( $query_args );
+            remove_filter( 'posts_orderby', $mime_filter );
+        } else {
+            $query = new WP_Query( $query_args );
+        }
+
         return array(
             'attachments' => $query->posts,
             'total'       => $query->found_posts,
