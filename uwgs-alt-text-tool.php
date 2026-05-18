@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.2';
+    const VERSION                = '3.1.3';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -2072,7 +2072,7 @@ JS;
                     $sa_data  = json_decode( $sa_json, true );
                     $sa_email = isset( $sa_data['client_email'] ) ? $sa_data['client_email'] : '';
                 }
-                $sync_ready    = $sa_configured && ! empty( $property_id );
+                $sync_ready    = ! empty( $property_id ) && ( $sa_configured || $site_kit_active );
                 $ga_save_nonce = wp_create_nonce( self::NONCE_GA_SAVE );
                 $ga_sync_nonce = wp_create_nonce( self::NONCE_GA_SYNC );
                 ?>
@@ -2084,9 +2084,9 @@ JS;
                         <div class="notice notice-success inline" style="margin:0 0 16px;">
                             <p><?php
                             if ( $sk_property_id ) {
-                                printf( esc_html__( 'Google Site Kit is connected (property ID: %s). It has been pre-filled below. A service account is still required for server-side data syncing.', 'uwgs-alt-text-tool' ), '<strong>' . esc_html( $sk_property_id ) . '</strong>' );
+                                printf( esc_html__( 'Google Site Kit is connected (property ID: %s). Authentication uses your Site Kit credentials — no service account is required.', 'uwgs-alt-text-tool' ), '<strong>' . esc_html( $sk_property_id ) . '</strong>' );
                             } else {
-                                esc_html_e( 'Google Site Kit is connected. Enter your GA4 property ID and add a service account to enable data syncing.', 'uwgs-alt-text-tool' );
+                                esc_html_e( 'Google Site Kit is connected. Enter your GA4 property ID below and save to enable data syncing.', 'uwgs-alt-text-tool' );
                             }
                             ?></p>
                         </div>
@@ -2172,7 +2172,7 @@ JS;
                     </div>
                     <?php if ( ! $sync_ready ) : ?>
                         <p style="color:#999;font-style:italic;margin-top:16px;">
-                            <?php esc_html_e( 'Configure a service account and property ID above, then save to enable data syncing.', 'uwgs-alt-text-tool' ); ?>
+                            <?php esc_html_e( 'Enter a property ID and save to enable data syncing. Authentication uses Google Site Kit if connected, otherwise a service account is required.', 'uwgs-alt-text-tool' ); ?>
                         </p>
                     <?php endif; ?>
                 </div>
@@ -3350,10 +3350,55 @@ JS;
         return $input . '.' . $b64url( $sig );
     }
 
+    private function get_site_kit_access_token() {
+        $users = get_users( array( 'role__in' => array( 'administrator' ), 'number' => -1, 'fields' => 'ID' ) );
+        // Prefer current user if they're an admin.
+        $current = get_current_user_id();
+        if ( $current && in_array( $current, $users, false ) ) {
+            array_unshift( $users, $current );
+            $users = array_unique( $users );
+        }
+        foreach ( $users as $uid ) {
+            $uid        = (int) $uid;
+            $expires_in = (int) get_user_meta( $uid, 'googlesitekit_access_token_expires_in', true );
+            $created_at = (int) get_user_meta( $uid, 'googlesitekit_access_token_created_at', true );
+            if ( $created_at && $created_at + $expires_in - 60 < time() ) { continue; } // expired
+            $encrypted = get_user_meta( $uid, 'googlesitekit_access_token', true );
+            if ( ! $encrypted ) { continue; }
+            $token = $this->decrypt_site_kit_value( $encrypted );
+            if ( $token ) { return $token; }
+        }
+        return null;
+    }
+
+    private function decrypt_site_kit_value( $raw_value ) {
+        if ( ! extension_loaded( 'openssl' ) || ! is_string( $raw_value ) ) { return false; }
+        $decoded = base64_decode( $raw_value, true );
+        if ( false === $decoded ) { return false; }
+        $key    = defined( 'GOOGLESITEKIT_ENCRYPTION_KEY' ) && GOOGLESITEKIT_ENCRYPTION_KEY
+                    ? GOOGLESITEKIT_ENCRYPTION_KEY
+                    : ( defined( 'LOGGED_IN_KEY' ) ? LOGGED_IN_KEY : 'das-ist-kein-geheimer-schluessel' );
+        $salt   = defined( 'GOOGLESITEKIT_ENCRYPTION_SALT' ) && GOOGLESITEKIT_ENCRYPTION_SALT
+                    ? GOOGLESITEKIT_ENCRYPTION_SALT
+                    : ( defined( 'LOGGED_IN_SALT' ) ? LOGGED_IN_SALT : 'das-ist-kein-geheimes-salz' );
+        $method = 'aes-256-ctr';
+        $ivlen  = openssl_cipher_iv_length( $method );
+        $iv     = substr( $decoded, 0, $ivlen );
+        $data   = substr( $decoded, $ivlen );
+        $value  = openssl_decrypt( $data, $method, $key, 0, $iv );
+        if ( ! $value || substr( $value, -strlen( $salt ) ) !== $salt ) { return false; }
+        return substr( $value, 0, -strlen( $salt ) );
+    }
+
     private function get_ga4_access_token() {
+        // Prefer Site Kit's live OAuth token — no service account needed.
+        $site_kit_token = $this->get_site_kit_access_token();
+        if ( $site_kit_token ) { return $site_kit_token; }
+
+        // Fall back to configured service account.
         $json = $this->get_service_account_json();
         if ( empty( $json ) ) {
-            return new WP_Error( 'no_credentials', __( 'No service account credentials configured.', 'uwgs-alt-text-tool' ) );
+            return new WP_Error( 'no_credentials', __( 'No credentials available. Connect Google Site Kit or configure a service account.', 'uwgs-alt-text-tool' ) );
         }
         $creds = json_decode( $json, true );
         if ( ! is_array( $creds ) || empty( $creds['client_email'] ) || empty( $creds['private_key'] ) ) {
@@ -3516,11 +3561,12 @@ JS;
             $sa_email = isset( $sa_data['client_email'] ) ? $sa_data['client_email'] : '';
         }
 
+        $site_kit_connected = (bool) $this->get_ga4_property_id_from_site_kit();
         wp_send_json_success( array(
             'sa_email'    => $sa_email,
             'property_id' => $pid,
             'window'      => $window,
-            'ready'       => $sa_email !== '' && $pid !== '',
+            'ready'       => $pid !== '' && ( $sa_email !== '' || $site_kit_connected ),
         ) );
     }
 
@@ -3528,10 +3574,11 @@ JS;
         wp_register_script( 'uwgs-ga-settings', plugins_url( 'js/uwgs-ga-settings.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-ga-settings' );
         wp_add_inline_script( 'uwgs-ga-settings', 'var uwgsGaSettingsData = ' . wp_json_encode( array(
-            'ajaxUrl'   => admin_url( 'admin-ajax.php' ),
-            'saveNonce' => wp_create_nonce( self::NONCE_GA_SAVE ),
-            'syncNonce' => wp_create_nonce( self::NONCE_GA_SYNC ),
-            'i18n'      => array(
+            'ajaxUrl'          => admin_url( 'admin-ajax.php' ),
+            'saveNonce'        => wp_create_nonce( self::NONCE_GA_SAVE ),
+            'syncNonce'        => wp_create_nonce( self::NONCE_GA_SYNC ),
+            'siteKitConnected' => (bool) $this->get_ga4_property_id_from_site_kit(),
+            'i18n'             => array(
                 'saving'        => __( 'Saving…', 'uwgs-alt-text-tool' ),
                 'saved'         => __( 'Settings saved.', 'uwgs-alt-text-tool' ),
                 'saveError'     => __( 'Error saving settings.', 'uwgs-alt-text-tool' ),
