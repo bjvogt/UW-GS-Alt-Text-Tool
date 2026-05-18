@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.0';
+    const VERSION                = '3.1.1';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -2328,29 +2328,68 @@ JS;
 
                 $first_item  = ( ( $paged - 1 ) * $per_page ) + 1;
                 $last_item   = min( $paged * $per_page, $total );
+
+                // Closure: renders the WP-style first/prev/N of M/next/last pagination block.
+                $render_pagination = function() use ( $paged, $total_pages, $total, $first_item, $last_item, $base_url, $confidence, $type_filter, $orderby, $order ) {
+                    $pg_url = function( $p ) use ( $base_url, $confidence, $type_filter, $orderby, $order ) {
+                        return add_query_arg( array(
+                            'paged'      => $p,
+                            'confidence' => $confidence,
+                            'media_type' => $type_filter,
+                            'orderby'    => $orderby,
+                            'order'      => $order,
+                        ), $base_url );
+                    };
+                    $count_text = esc_html( sprintf(
+                        /* translators: 1: first item, 2: last item, 3: total */
+                        _n( '%2$s of %3$s item', '%1$s&#8211;%2$s of %3$s items', $total, 'uwgs-alt-text-tool' ),
+                        number_format_i18n( $first_item ),
+                        number_format_i18n( $last_item ),
+                        number_format_i18n( $total )
+                    ) );
+                    echo '<div class="tablenav-pages">';
+                    echo '<span class="displaying-num">' . $count_text . '</span>';
+                    if ( $total_pages > 1 ) {
+                        echo '<span class="pagination-links">';
+                        if ( $paged <= 1 ) {
+                            echo '<span class="tablenav-pages-navspan button disabled" aria-hidden="true">&laquo;</span>';
+                            echo '<span class="tablenav-pages-navspan button disabled" aria-hidden="true">&lsaquo;</span>';
+                        } else {
+                            printf( '<a class="first-page button" href="%s"><span class="screen-reader-text">%s</span><span aria-hidden="true">&laquo;</span></a>',
+                                esc_url( $pg_url( 1 ) ), esc_html__( 'First page', 'uwgs-alt-text-tool' ) );
+                            printf( '<a class="prev-page button" href="%s"><span class="screen-reader-text">%s</span><span aria-hidden="true">&lsaquo;</span></a>',
+                                esc_url( $pg_url( $paged - 1 ) ), esc_html__( 'Previous page', 'uwgs-alt-text-tool' ) );
+                        }
+                        printf( '<span class="paging-input"><span class="tablenav-paging-text">%s %s %s</span></span>',
+                            number_format_i18n( $paged ),
+                            esc_html__( 'of', 'uwgs-alt-text-tool' ),
+                            number_format_i18n( $total_pages ) );
+                        if ( $paged >= $total_pages ) {
+                            echo '<span class="tablenav-pages-navspan button disabled" aria-hidden="true">&rsaquo;</span>';
+                            echo '<span class="tablenav-pages-navspan button disabled" aria-hidden="true">&raquo;</span>';
+                        } else {
+                            printf( '<a class="next-page button" href="%s"><span class="screen-reader-text">%s</span><span aria-hidden="true">&rsaquo;</span></a>',
+                                esc_url( $pg_url( $paged + 1 ) ), esc_html__( 'Next page', 'uwgs-alt-text-tool' ) );
+                            printf( '<a class="last-page button" href="%s"><span class="screen-reader-text">%s</span><span aria-hidden="true">&raquo;</span></a>',
+                                esc_url( $pg_url( $total_pages ) ), esc_html__( 'Last page', 'uwgs-alt-text-tool' ) );
+                        }
+                        echo '</span>'; // .pagination-links
+                    }
+                    echo '</div>'; // .tablenav-pages
+                };
                 ?>
                 <form method="post" id="uwgs-unused-form">
                     <?php wp_nonce_field( self::NONCE_UNUSED_ACTION, 'uwgs_unused_nonce' ); ?>
                     <div class="tablenav top">
                         <div class="alignleft actions bulkactions">
-                            <select id="uwgs-bulk-action" name="bulk_action">
+                            <select id="uwgs-bulk-action" class="uwgs-bulk-action-sel" name="bulk_action">
                                 <option value=""><?php esc_html_e( 'Bulk actions', 'uwgs-alt-text-tool' ); ?></option>
                                 <option value="trash"><?php esc_html_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?></option>
                             </select>
-                            <button type="button" id="uwgs-bulk-apply" class="button"><?php esc_html_e( 'Apply', 'uwgs-alt-text-tool' ); ?></button>
-                            <span id="uwgs-bulk-feedback" style="font-size:12px;color:#555;margin-left:8px;"></span>
+                            <button type="button" id="uwgs-bulk-apply" class="button uwgs-bulk-apply-btn"><?php esc_html_e( 'Apply', 'uwgs-alt-text-tool' ); ?></button>
+                            <span id="uwgs-bulk-feedback" class="uwgs-bulk-feedback" style="font-size:12px;color:#555;margin-left:8px;"></span>
                         </div>
-                        <div class="tablenav-pages" style="float:right;line-height:2;">
-                            <span class="displaying-num">
-                                <?php echo esc_html( sprintf(
-                                    /* translators: 1: first item number, 2: last item number, 3: total */
-                                    _n( '%2$s of %3$s item', '%1$s–%2$s of %3$s items', $total, 'uwgs-alt-text-tool' ),
-                                    number_format_i18n( $first_item ),
-                                    number_format_i18n( $last_item ),
-                                    number_format_i18n( $total )
-                                ) ); ?>
-                            </span>
-                        </div>
+                        <?php $render_pagination(); ?>
                         <br class="clear">
                     </div>
 
@@ -2435,35 +2474,16 @@ JS;
                         </tbody>
                     </table>
 
-                    <div class="tablenav bottom" style="margin-top:8px;">
-                        <?php if ( $total_pages > 1 ) : ?>
-                            <div class="tablenav-pages">
-                                <span class="displaying-num">
-                                    <?php echo esc_html( sprintf(
-                                        _n( '%2$s of %3$s item', '%1$s–%2$s of %3$s items', $total, 'uwgs-alt-text-tool' ),
-                                        number_format_i18n( $first_item ),
-                                        number_format_i18n( $last_item ),
-                                        number_format_i18n( $total )
-                                    ) ); ?>
-                                </span>
-                                <?php
-                                echo paginate_links( array(
-                                    'base'     => add_query_arg( 'paged', '%#%', $base_url ),
-                                    'format'   => '',
-                                    'current'  => $paged,
-                                    'total'    => $total_pages,
-                                    'add_args' => array(
-                                        'confidence' => $confidence,
-                                        'media_type' => $type_filter,
-                                        'orderby'    => $orderby,
-                                        'order'      => $order,
-                                    ),
-                                    'prev_text' => '&laquo;',
-                                    'next_text' => '&raquo;',
-                                ) );
-                                ?>
-                            </div>
-                        <?php endif; ?>
+                    <div class="tablenav bottom">
+                        <div class="alignleft actions bulkactions">
+                            <select class="uwgs-bulk-action-sel" name="bulk_action_bottom">
+                                <option value=""><?php esc_html_e( 'Bulk actions', 'uwgs-alt-text-tool' ); ?></option>
+                                <option value="trash"><?php esc_html_e( 'Move to Trash', 'uwgs-alt-text-tool' ); ?></option>
+                            </select>
+                            <button type="button" class="button uwgs-bulk-apply-btn"><?php esc_html_e( 'Apply', 'uwgs-alt-text-tool' ); ?></button>
+                            <span class="uwgs-bulk-feedback" style="font-size:12px;color:#555;margin-left:8px;"></span>
+                        </div>
+                        <?php $render_pagination(); ?>
                         <br class="clear">
                     </div>
 

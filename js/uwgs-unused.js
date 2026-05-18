@@ -115,12 +115,12 @@
         pendingTrashIds = [];
     }
 
-    $( '#uwgs-bulk-apply' ).on( 'click', function() {
-        var action = $( '#uwgs-bulk-action' ).val();
+    $( document ).on( 'click', '.uwgs-bulk-apply-btn', function() {
+        var action = $( this ).closest( '.tablenav' ).find( '.uwgs-bulk-action-sel' ).val();
         if ( action !== 'trash' ) { return; }
         var ids = getSelectedIds();
         if ( ids.length === 0 ) {
-            $( '#uwgs-bulk-feedback' ).text( i18n.selectItems || 'Please select at least one item.' );
+            $( '.uwgs-bulk-feedback' ).text( i18n.selectItems || 'Please select at least one item.' );
             return;
         }
         showTrashConfirm( ids );
@@ -138,8 +138,8 @@
     } );
 
     function doTrash( ids ) {
-        $( '#uwgs-bulk-feedback' ).text( i18n.trashing || 'Moving to Trash…' );
-        $( '#uwgs-bulk-apply' ).prop( 'disabled', true );
+        $( '.uwgs-bulk-feedback' ).text( i18n.trashing || 'Moving to Trash…' );
+        $( '.uwgs-bulk-apply-btn' ).prop( 'disabled', true );
 
         var fd = new FormData();
         fd.append( 'action', 'uwgs_bulk_trash_unused' );
@@ -149,13 +149,12 @@
         fetch( ajaxUrl, { method: 'POST', body: fd } )
             .then( function( r ) { return r.json(); } )
             .then( function( response ) {
-                $( '#uwgs-bulk-apply' ).prop( 'disabled', false );
+                $( '.uwgs-bulk-apply-btn' ).prop( 'disabled', false );
                 if ( ! response.success ) {
-                    $( '#uwgs-bulk-feedback' ).text( i18n.trashError || 'Some items could not be trashed.' );
+                    $( '.uwgs-bulk-feedback' ).text( i18n.trashError || 'Some items could not be trashed.' );
                     return;
                 }
                 var trashed = response.data.trashed || [];
-                // Remove trashed rows from DOM
                 trashed.forEach( function( id ) {
                     $( 'tr[data-id="' + id + '"]' ).fadeOut( 300, function() { $( this ).remove(); } );
                 } );
@@ -163,12 +162,12 @@
                 if ( response.data.failed && response.data.failed.length ) {
                     msg += ' ' + ( i18n.trashError || 'Some items could not be trashed.' );
                 }
-                $( '#uwgs-bulk-feedback' ).text( msg );
+                $( '.uwgs-bulk-feedback' ).text( msg );
                 $( '#uwgs-select-all' ).prop( 'checked', false );
             } )
             .catch( function() {
-                $( '#uwgs-bulk-apply' ).prop( 'disabled', false );
-                $( '#uwgs-bulk-feedback' ).text( i18n.trashError || 'Some items could not be trashed.' );
+                $( '.uwgs-bulk-apply-btn' ).prop( 'disabled', false );
+                $( '.uwgs-bulk-feedback' ).text( i18n.trashError || 'Some items could not be trashed.' );
             } );
     }
 
