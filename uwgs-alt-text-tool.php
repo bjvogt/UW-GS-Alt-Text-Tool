@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.8';
+    const VERSION                = '3.1.9';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3363,15 +3363,44 @@ JS;
         );
         if ( empty( $rows ) ) { return null; }
         foreach ( $rows as $row ) {
-            $uid    = (int) $row->user_id;
-            $prefix = str_replace( 'googlesitekit_access_token', '', $row->meta_key );
+            $uid        = (int) $row->user_id;
+            $prefix     = str_replace( 'googlesitekit_access_token', '', $row->meta_key );
             $expires_in = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_expires_in', true );
             $created_at = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_created_at', true );
-            if ( $created_at && $created_at + $expires_in - 60 < time() ) { continue; } // expired
-            $token = $this->decrypt_site_kit_value( $row->meta_value );
-            if ( $token ) { return $token; }
+            $is_expired = $created_at && $created_at + $expires_in - 60 < time();
+            if ( ! $is_expired ) {
+                $token = $this->decrypt_site_kit_value( $row->meta_value );
+                if ( $token ) { return $token; }
+            }
+            // Token expired — try refreshing via Site Kit's OAuth proxy.
+            $refreshed = $this->refresh_site_kit_token( $uid, $prefix );
+            if ( $refreshed ) { return $refreshed; }
         }
         return null;
+    }
+
+    private function refresh_site_kit_token( $uid, $meta_prefix ) {
+        $enc_refresh = get_user_meta( $uid, $meta_prefix . 'googlesitekit_refresh_token', true );
+        if ( ! $enc_refresh ) { return null; }
+        $refresh_token = $this->decrypt_site_kit_value( $enc_refresh );
+        if ( ! $refresh_token ) { return null; }
+
+        $creds     = get_option( 'googlesitekit_credentials', array() );
+        $client_id = ! empty( $creds['oauth2_client_id'] ) ? $creds['oauth2_client_id'] : '';
+        if ( ! $client_id ) { return null; }
+
+        $response = wp_remote_post( 'https://sitekit.withgoogle.com/o/oauth2/token/', array(
+            'body'    => array_filter( array(
+                'grant_type'    => 'refresh_token',
+                'refresh_token' => $refresh_token,
+                'client_id'     => $client_id,
+                'client_secret' => ! empty( $creds['oauth2_client_secret'] ) ? $creds['oauth2_client_secret'] : '',
+            ) ),
+            'timeout' => 15,
+        ) );
+        if ( is_wp_error( $response ) ) { return null; }
+        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+        return ! empty( $body['access_token'] ) ? $body['access_token'] : null;
     }
 
     private function decrypt_site_kit_value( $raw_value ) {
