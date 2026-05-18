@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.3';
+    const VERSION                = '3.1.4';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3360,10 +3360,11 @@ JS;
         }
         foreach ( $users as $uid ) {
             $uid        = (int) $uid;
-            $expires_in = (int) get_user_meta( $uid, 'googlesitekit_access_token_expires_in', true );
-            $created_at = (int) get_user_meta( $uid, 'googlesitekit_access_token_created_at', true );
+            // Site Kit uses get_user_option() which applies the blog DB prefix on single-site.
+            $expires_in = (int) get_user_option( 'googlesitekit_access_token_expires_in', $uid );
+            $created_at = (int) get_user_option( 'googlesitekit_access_token_created_at', $uid );
             if ( $created_at && $created_at + $expires_in - 60 < time() ) { continue; } // expired
-            $encrypted = get_user_meta( $uid, 'googlesitekit_access_token', true );
+            $encrypted = get_user_option( 'googlesitekit_access_token', $uid );
             if ( ! $encrypted ) { continue; }
             $token = $this->decrypt_site_kit_value( $encrypted );
             if ( $token ) { return $token; }
