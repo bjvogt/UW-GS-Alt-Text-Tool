@@ -170,11 +170,17 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.1';
+    const VERSION                = '3.1.2';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
     const OPTION_UNUSED_LAST_SCAN = 'uwgs_unused_last_scan';
+    const OPTION_GA4_PROPERTY_ID  = 'uwgs_ga4_property_id';
+    const OPTION_GA_SERVICE_ACCOUNT = 'uwgs_ga_service_account_json';
+    const OPTION_GA_ANALYSIS_WINDOW = 'uwgs_ga_analysis_window';
+    const OPTION_GA_LAST_SYNC     = 'uwgs_ga_last_sync';
+    const NONCE_GA_SYNC           = 'uwgs_ga_sync';
+    const NONCE_GA_SAVE           = 'uwgs_save_ga_settings';
 
     const LOW_QUALITY_WORDS = array(
         'image', 'photo', 'img', 'picture', 'screenshot',
@@ -222,6 +228,8 @@ class UWGS_Alt_Text_Tool {
         add_action( 'wp_ajax_uwgs_export_csv',         array( $this, 'ajax_export_csv' ) );
         add_action( 'wp_ajax_uwgs_dismiss_scan_notice',array( $this, 'ajax_dismiss_scan_notice' ) );
         add_action( 'admin_notices',                   array( $this, 'render_unused_scan_notice' ) );
+        add_action( 'wp_ajax_uwgs_sync_ga4',           array( $this, 'ajax_sync_ga4' ) );
+        add_action( 'wp_ajax_uwgs_save_ga_settings',   array( $this, 'ajax_save_ga_settings' ) );
         add_filter( 'set_screen_option_uwgs_unused_per_page', function( $status, $option, $value ) {
             return max( 1, (int) $value );
         }, 10, 3 );
@@ -925,6 +933,7 @@ class UWGS_Alt_Text_Tool {
             $this->enqueue_attachment_details_assets();
         }
         if ( 'media_page_uwgs-unused-media' === $hook ) { $this->enqueue_unused_assets(); }
+        if ( 'settings_page_uwgs-alt-text-tool' === $hook ) { $this->enqueue_settings_assets(); }
         if ( 'media-new.php' === $hook ) { $this->enqueue_upload_page_assets(); }
         if ( in_array( $hook, array( 'post.php', 'post-new.php' ), true ) ) {
             global $post;
@@ -2049,20 +2058,122 @@ JS;
                 <?php $this->render_excluded_items_table(); ?>
 
             <?php elseif ( $active_tab === 'google-analytics' ) : ?>
-                <div style="margin-top:20px;max-width:600px;">
+                <?php
+                $site_kit_active = $this->is_site_kit_ga4_connected();
+                $sk_property_id  = $site_kit_active ? $this->get_ga4_property_id_from_site_kit() : '';
+                $saved_prop_id   = get_option( self::OPTION_GA4_PROPERTY_ID, '' );
+                $property_id     = $saved_prop_id !== '' ? $saved_prop_id : $sk_property_id;
+                $analysis_window = (int) get_option( self::OPTION_GA_ANALYSIS_WINDOW, 90 );
+                $ga_last_sync    = get_option( self::OPTION_GA_LAST_SYNC, 0 );
+                $sa_json         = $this->get_service_account_json();
+                $sa_configured   = ! empty( $sa_json );
+                $sa_email        = '';
+                if ( $sa_configured ) {
+                    $sa_data  = json_decode( $sa_json, true );
+                    $sa_email = isset( $sa_data['client_email'] ) ? $sa_data['client_email'] : '';
+                }
+                $sync_ready    = $sa_configured && ! empty( $property_id );
+                $ga_save_nonce = wp_create_nonce( self::NONCE_GA_SAVE );
+                $ga_sync_nonce = wp_create_nonce( self::NONCE_GA_SYNC );
+                ?>
+                <div style="margin-top:20px;max-width:640px;" id="uwgs-ga-settings-wrap">
                     <h2 style="margin-top:0;"><?php esc_html_e( 'Google Analytics Integration', 'uwgs-alt-text-tool' ); ?></h2>
-                    <?php
-                    $site_kit_active = $this->is_site_kit_ga4_connected();
-                    if ( $site_kit_active ) : ?>
+                    <p style="color:#555;"><?php esc_html_e( 'Connect your GA4 property to overlay pageview counts on the Unused Media list. Items with zero traffic are the safest candidates for removal.', 'uwgs-alt-text-tool' ); ?></p>
+
+                    <?php if ( $site_kit_active ) : ?>
                         <div class="notice notice-success inline" style="margin:0 0 16px;">
-                            <p><?php esc_html_e( 'Google Site Kit is connected and GA4 is active. Traffic data integration will use this connection — no additional setup required.', 'uwgs-alt-text-tool' ); ?></p>
+                            <p><?php
+                            if ( $sk_property_id ) {
+                                printf( esc_html__( 'Google Site Kit is connected (property ID: %s). It has been pre-filled below. A service account is still required for server-side data syncing.', 'uwgs-alt-text-tool' ), '<strong>' . esc_html( $sk_property_id ) . '</strong>' );
+                            } else {
+                                esc_html_e( 'Google Site Kit is connected. Enter your GA4 property ID and add a service account to enable data syncing.', 'uwgs-alt-text-tool' );
+                            }
+                            ?></p>
                         </div>
-                        <p><?php esc_html_e( 'When GA4 data syncing is added in a future update, it will automatically use your existing Site Kit authentication.', 'uwgs-alt-text-tool' ); ?></p>
-                    <?php else : ?>
-                        <div class="notice notice-info inline" style="margin:0 0 16px;">
-                            <p><?php printf( esc_html__( 'Google Site Kit is not connected. To enable GA4 traffic data in the Unused Media scanner, %s and connect it to GA4.', 'uwgs-alt-text-tool' ), '<a href="' . esc_url( admin_url( 'admin.php?page=googlesitekit-splash' ) ) . '">' . esc_html__( 'install Google Site Kit', 'uwgs-alt-text-tool' ) . '</a>' ); ?></p>
-                        </div>
-                        <p style="color:#555;"><?php esc_html_e( 'GA4 traffic data integration is planned for a future update. It will show pageview counts per media file so you can prioritize which unused items are safe to remove.', 'uwgs-alt-text-tool' ); ?></p>
+                    <?php endif; ?>
+
+                    <div id="uwgs-ga-save-feedback" style="display:none;margin-bottom:12px;"></div>
+
+                    <table class="form-table" style="max-width:620px;">
+                        <tr>
+                            <th scope="row" style="width:160px;"><?php esc_html_e( 'GA4 Property ID', 'uwgs-alt-text-tool' ); ?></th>
+                            <td>
+                                <input type="text" id="uwgs-ga-property-id" class="regular-text"
+                                       value="<?php echo esc_attr( $property_id ); ?>"
+                                       placeholder="<?php esc_attr_e( 'e.g. 123456789', 'uwgs-alt-text-tool' ); ?>">
+                                <p class="description"><?php esc_html_e( 'Numeric property ID from Google Analytics → Admin → Property Settings. Do not use the G-XXXXXX Measurement ID.', 'uwgs-alt-text-tool' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Analysis window', 'uwgs-alt-text-tool' ); ?></th>
+                            <td>
+                                <fieldset>
+                                    <?php foreach ( array( 30 => '30 days', 60 => '60 days', 90 => '90 days', 180 => '180 days' ) as $days => $label ) : ?>
+                                        <label style="margin-right:16px;">
+                                            <input type="radio" name="uwgs_ga_window"
+                                                   value="<?php echo esc_attr( $days ); ?>"
+                                                   <?php checked( $analysis_window, $days ); ?>>
+                                            <?php echo esc_html( $label ); ?>
+                                        </label>
+                                    <?php endforeach; ?>
+                                </fieldset>
+                                <p class="description"><?php esc_html_e( 'Date range sent to the GA4 Data API.', 'uwgs-alt-text-tool' ); ?></p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><?php esc_html_e( 'Service Account', 'uwgs-alt-text-tool' ); ?></th>
+                            <td>
+                                <?php if ( $sa_configured && $sa_email ) : ?>
+                                    <div style="padding:8px 12px;background:#f0f6e4;border-left:4px solid #46b450;margin-bottom:8px;">
+                                        <span style="color:#2e7d32;font-weight:600;">&#10003; <?php esc_html_e( 'Configured:', 'uwgs-alt-text-tool' ); ?></span>
+                                        <code id="uwgs-ga-sa-status" style="margin-left:6px;"><?php echo esc_html( $sa_email ); ?></code>
+                                        <button type="button" class="button button-small" id="uwgs-ga-remove-sa"
+                                                style="margin-left:12px;color:#b32d2e;border-color:#b32d2e;">
+                                            <?php esc_html_e( 'Remove', 'uwgs-alt-text-tool' ); ?>
+                                        </button>
+                                    </div>
+                                    <p class="description"><?php esc_html_e( 'To replace, paste a new JSON key below and save.', 'uwgs-alt-text-tool' ); ?></p>
+                                <?php else : ?>
+                                    <p class="description" style="margin-bottom:8px;"><?php esc_html_e( 'Paste the full contents of a Google Cloud service account JSON key file. The service account needs the Analytics Data API Viewer role on this property.', 'uwgs-alt-text-tool' ); ?></p>
+                                <?php endif; ?>
+                                <textarea id="uwgs-ga-service-account" rows="5"
+                                          style="font-family:monospace;font-size:11px;width:100%;max-width:520px;"
+                                          placeholder='{"type":"service_account","client_email":"name@project.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----\n..."}'></textarea>
+                                <p class="description"><?php esc_html_e( 'Leave blank to keep the existing key. Stored encrypted in the database using AES-256-CBC.', 'uwgs-alt-text-tool' ); ?></p>
+                            </td>
+                        </tr>
+                    </table>
+
+                    <p>
+                        <button type="button" id="uwgs-ga-save-btn" class="button button-primary"
+                                data-nonce="<?php echo esc_attr( $ga_save_nonce ); ?>">
+                            <?php esc_html_e( 'Save Settings', 'uwgs-alt-text-tool' ); ?>
+                        </button>
+                    </p>
+
+                    <div id="uwgs-ga-sync-section" <?php echo $sync_ready ? '' : 'style="display:none;"'; ?>>
+                        <hr>
+                        <h3><?php esc_html_e( 'Sync GA4 Data', 'uwgs-alt-text-tool' ); ?></h3>
+                        <p style="color:#555;">
+                            <?php if ( $ga_last_sync ) : ?>
+                                <?php printf(
+                                    esc_html__( 'Last synced: %s', 'uwgs-alt-text-tool' ),
+                                    '<strong>' . esc_html( wp_date( get_option( 'date_format' ) . ' \a\t ' . get_option( 'time_format' ), $ga_last_sync ) ) . '</strong>'
+                                ); ?>
+                            <?php else : ?>
+                                <?php esc_html_e( 'Not yet synced.', 'uwgs-alt-text-tool' ); ?>
+                            <?php endif; ?>
+                        </p>
+                        <button type="button" id="uwgs-ga-sync-btn" class="button"
+                                data-nonce="<?php echo esc_attr( $ga_sync_nonce ); ?>">
+                            &#8635; <?php esc_html_e( 'Sync GA4 Data', 'uwgs-alt-text-tool' ); ?>
+                        </button>
+                        <span id="uwgs-ga-sync-status" style="margin-left:12px;font-size:13px;color:#555;"></span>
+                    </div>
+                    <?php if ( ! $sync_ready ) : ?>
+                        <p style="color:#999;font-style:italic;margin-top:16px;">
+                            <?php esc_html_e( 'Configure a service account and property ID above, then save to enable data syncing.', 'uwgs-alt-text-tool' ); ?>
+                        </p>
                     <?php endif; ?>
                 </div>
             <?php endif; ?>
@@ -2188,17 +2299,20 @@ JS;
         $per_page    = (int) get_user_option( 'uwgs_unused_per_page' );
         if ( $per_page < 1 ) { $per_page = 50; }
 
-        $allowed_orderby = array( 'date', 'author', 'type', 'size', 'confidence' );
+        $allowed_orderby = array( 'date', 'author', 'type', 'size', 'confidence', 'ga_views' );
         $orderby         = isset( $_GET['orderby'] ) && in_array( $_GET['orderby'], $allowed_orderby, true ) ? $_GET['orderby'] : 'date';
         $order           = isset( $_GET['order'] ) && strtoupper( $_GET['order'] ) === 'ASC' ? 'ASC' : 'DESC';
+        $zero_traffic    = ! empty( $_GET['zero_traffic'] ) ? 1 : 0;
+        $ga_synced       = (bool) get_option( self::OPTION_GA_LAST_SYNC, 0 );
 
         $results = $this->get_unused_attachments( array(
-            'confidence' => $confidence,
-            'type'       => $type_filter,
-            'per_page'   => $per_page,
-            'page'       => $paged,
-            'orderby'    => $orderby,
-            'order'      => $order,
+            'confidence'   => $confidence,
+            'type'         => $type_filter,
+            'per_page'     => $per_page,
+            'page'         => $paged,
+            'orderby'      => $orderby,
+            'order'        => $order,
+            'zero_traffic' => $zero_traffic,
         ) );
 
         $attachments = $results['attachments'];
@@ -2257,7 +2371,7 @@ JS;
                             'document' => __( 'Documents', 'uwgs-alt-text-tool' ),
                         );
                         foreach ( $types as $key => $label ) :
-                            $url = add_query_arg( array( 'media_type' => $key, 'confidence' => $confidence, 'paged' => 1 ), $base_url );
+                            $url = add_query_arg( array_filter( array( 'media_type' => $key, 'confidence' => $confidence, 'paged' => 1, 'zero_traffic' => $zero_traffic ?: null ) ), $base_url );
                             if ( $key === $type_filter ) :
                                 echo '<strong>' . esc_html( $label ) . '</strong>';
                             else :
@@ -2277,7 +2391,7 @@ JS;
                             'uncertain' => __( 'Uncertain only', 'uwgs-alt-text-tool' ),
                         );
                         foreach ( $conf_opts as $key => $label ) :
-                            $url = add_query_arg( array( 'confidence' => $key, 'media_type' => $type_filter, 'paged' => 1 ), $base_url );
+                            $url = add_query_arg( array_filter( array( 'confidence' => $key, 'media_type' => $type_filter, 'paged' => 1, 'zero_traffic' => $zero_traffic ?: null ) ), $base_url );
                             if ( $key === $confidence ) :
                                 echo '<strong>' . esc_html( $label ) . '</strong>';
                             else :
@@ -2287,10 +2401,21 @@ JS;
                         endforeach;
                         ?>
                     </span>
+                    <?php if ( $ga_synced ) : ?>
+                        <span style="font-size:12px;">
+                            <?php if ( $zero_traffic ) : ?>
+                                <strong><?php esc_html_e( 'Zero GA traffic', 'uwgs-alt-text-tool' ); ?></strong>
+                                &middot;
+                                <a href="<?php echo esc_url( add_query_arg( array_filter( array( 'confidence' => $confidence, 'media_type' => $type_filter, 'paged' => 1 ) ), $base_url ) ); ?>"><?php esc_html_e( 'Show all', 'uwgs-alt-text-tool' ); ?></a>
+                            <?php else : ?>
+                                <a href="<?php echo esc_url( add_query_arg( array_filter( array( 'confidence' => $confidence, 'media_type' => $type_filter, 'paged' => 1, 'zero_traffic' => 1 ) ), $base_url ) ); ?>"><?php esc_html_e( 'Zero GA traffic only', 'uwgs-alt-text-tool' ); ?></a>
+                            <?php endif; ?>
+                        </span>
+                    <?php endif; ?>
                 </div>
 
                 <?php if ( ! empty( $attachments ) ) : ?>
-                    <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'action' => 'uwgs_export_csv', 'confidence' => $confidence, 'media_type' => $type_filter ), admin_url( 'admin-ajax.php' ) ), self::NONCE_UNUSED_ACTION, 'nonce' ) ); ?>" class="button">
+                    <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( array_filter( array( 'action' => 'uwgs_export_csv', 'confidence' => $confidence, 'media_type' => $type_filter, 'zero_traffic' => $zero_traffic ?: null ) ), admin_url( 'admin-ajax.php' ) ), self::NONCE_UNUSED_ACTION, 'nonce' ) ); ?>" class="button">
                         &#8595; <?php esc_html_e( 'Export CSV', 'uwgs-alt-text-tool' ); ?>
                     </a>
                 <?php endif; ?>
@@ -2308,17 +2433,18 @@ JS;
 
                 <?php
                 // Helper: render a sortable column header link.
-                $sort_header = function( $col_key, $label, $width = '' ) use ( $orderby, $order, $base_url, $confidence, $type_filter, $paged ) {
+                $sort_header = function( $col_key, $label, $width = '' ) use ( $orderby, $order, $base_url, $confidence, $type_filter, $paged, $zero_traffic ) {
                     $is_active   = ( $orderby === $col_key );
                     $next_order  = ( $is_active && $order === 'DESC' ) ? 'ASC' : 'DESC';
                     $arrow       = $is_active ? ( $order === 'DESC' ? ' &#8595;' : ' &#8593;' ) : '';
-                    $url         = add_query_arg( array(
-                        'orderby'    => $col_key,
-                        'order'      => $next_order,
-                        'confidence' => $confidence,
-                        'media_type' => $type_filter,
-                        'paged'      => 1,
-                    ), $base_url );
+                    $url         = add_query_arg( array_filter( array(
+                        'orderby'      => $col_key,
+                        'order'        => $next_order,
+                        'confidence'   => $confidence,
+                        'media_type'   => $type_filter,
+                        'paged'        => 1,
+                        'zero_traffic' => $zero_traffic ?: null,
+                    ) ), $base_url );
                     $style       = $width ? ' style="width:' . esc_attr( $width ) . ';"' : '';
                     $class       = $is_active ? ' sorted ' . strtolower( $order ) : ' sortable desc';
                     echo '<th scope="col"' . $style . ' class="column-' . esc_attr( $col_key ) . $class . '">'
@@ -2330,15 +2456,16 @@ JS;
                 $last_item   = min( $paged * $per_page, $total );
 
                 // Closure: renders the WP-style first/prev/N of M/next/last pagination block.
-                $render_pagination = function() use ( $paged, $total_pages, $total, $first_item, $last_item, $base_url, $confidence, $type_filter, $orderby, $order ) {
-                    $pg_url = function( $p ) use ( $base_url, $confidence, $type_filter, $orderby, $order ) {
-                        return add_query_arg( array(
-                            'paged'      => $p,
-                            'confidence' => $confidence,
-                            'media_type' => $type_filter,
-                            'orderby'    => $orderby,
-                            'order'      => $order,
-                        ), $base_url );
+                $render_pagination = function() use ( $paged, $total_pages, $total, $first_item, $last_item, $base_url, $confidence, $type_filter, $orderby, $order, $zero_traffic ) {
+                    $pg_url = function( $p ) use ( $base_url, $confidence, $type_filter, $orderby, $order, $zero_traffic ) {
+                        return add_query_arg( array_filter( array(
+                            'paged'        => $p,
+                            'confidence'   => $confidence,
+                            'media_type'   => $type_filter,
+                            'orderby'      => $orderby,
+                            'order'        => $order,
+                            'zero_traffic' => $zero_traffic ?: null,
+                        ) ), $base_url );
                     };
                     $count_text = esc_html( sprintf(
                         /* translators: 1: first item, 2: last item, 3: total */
@@ -2403,6 +2530,7 @@ JS;
                             <?php $sort_header( 'date',       __( 'Uploaded',   'uwgs-alt-text-tool' ), '100px' ); ?>
                             <?php $sort_header( 'author',     __( 'By',         'uwgs-alt-text-tool' ), '100px' ); ?>
                             <?php $sort_header( 'confidence', __( 'Confidence', 'uwgs-alt-text-tool' ), '110px' ); ?>
+                            <?php if ( $ga_synced ) { $sort_header( 'ga_views', __( 'GA Views', 'uwgs-alt-text-tool' ), '80px' ); } ?>
                             <th scope="col" style="width:120px;"><?php esc_html_e( 'Actions', 'uwgs-alt-text-tool' ); ?></th>
                         </tr></thead>
                         <tbody>
@@ -2452,6 +2580,23 @@ JS;
                                 <td style="font-size:12px;"><?php echo esc_html( get_the_date( 'Y-m-d', $attachment->ID ) ); ?></td>
                                 <td style="font-size:12px;"><?php echo esc_html( $author_name ); ?></td>
                                 <td><?php echo $conf_label; ?></td>
+                                <?php if ( $ga_synced ) :
+                                    $ga_views_val   = get_post_meta( $attachment->ID, self::META_GA_PAGEVIEWS, true );
+                                    $ga_synced_att  = get_post_meta( $attachment->ID, self::META_GA_SYNCED_AT, true );
+                                ?>
+                                <td style="font-size:12px;text-align:right;padding-right:12px;">
+                                    <?php if ( $ga_synced_att !== '' ) :
+                                        $views_int = (int) $ga_views_val;
+                                        if ( $views_int === 0 ) {
+                                            echo '<span style="color:#aaa;">0</span>';
+                                        } else {
+                                            echo esc_html( number_format_i18n( $views_int ) );
+                                        }
+                                    else : ?>
+                                        <span style="color:#ccc;">—</span>
+                                    <?php endif; ?>
+                                </td>
+                                <?php endif; ?>
                                 <td>
                                     <div style="display:flex;gap:4px;align-items:center;">
                                         <button type="button" class="button button-small uwgs-exclude-btn"
@@ -2506,12 +2651,13 @@ JS;
 
     private function get_unused_attachments( $args = array() ) {
         $defaults = array(
-            'confidence' => 'all',
-            'type'       => 'all',
-            'per_page'   => 50,
-            'page'       => 1,
-            'orderby'    => 'date',
-            'order'      => 'DESC',
+            'confidence'   => 'all',
+            'type'         => 'all',
+            'per_page'     => 50,
+            'page'         => 1,
+            'orderby'      => 'date',
+            'order'        => 'DESC',
+            'zero_traffic' => false,
         );
         $args = wp_parse_args( $args, $defaults );
 
@@ -2552,8 +2698,16 @@ JS;
                 unset( $query_args['order'] );
                 break;
             case 'confidence':
-                // Order alphabetically by status meta value (uncertain > unused).
-                $query_args['orderby']  = 'status_clause';
+                $query_args['orderby'] = 'status_clause';
+                break;
+            case 'ga_views':
+                $query_args['meta_query']['ga_views_clause'] = array(
+                    'key'     => self::META_GA_PAGEVIEWS,
+                    'type'    => 'NUMERIC',
+                    'compare' => 'EXISTS',
+                );
+                $query_args['orderby'] = array( 'ga_views_clause' => $args['order'] );
+                unset( $query_args['order'] );
                 break;
             case 'type':
                 // post_mime_type is not a native WP_Query orderby; handled via filter below.
@@ -2581,6 +2735,21 @@ JS;
                     );
                     break;
             }
+        }
+
+        // Zero-traffic filter: only items that have been synced and have 0 pageviews.
+        if ( ! empty( $args['zero_traffic'] ) ) {
+            $meta_query['ga_zero'] = array(
+                'key'     => self::META_GA_PAGEVIEWS,
+                'value'   => '0',
+                'compare' => '=',
+                'type'    => 'NUMERIC',
+            );
+            $meta_query['ga_synced'] = array(
+                'key'     => self::META_GA_SYNCED_AT,
+                'compare' => 'EXISTS',
+            );
+            $query_args['meta_query'] = $meta_query;
         }
 
         if ( $args['orderby'] === 'type' ) {
@@ -2947,14 +3116,17 @@ JS;
         }
         if ( ! current_user_can( 'upload_files' ) ) { wp_die( 'Permission denied.' ); }
 
-        $confidence  = isset( $_GET['confidence'] ) ? sanitize_key( $_GET['confidence'] ) : 'all';
-        $type_filter = isset( $_GET['media_type'] ) ? sanitize_key( $_GET['media_type'] ) : 'all';
+        $confidence   = isset( $_GET['confidence'] ) ? sanitize_key( $_GET['confidence'] ) : 'all';
+        $type_filter  = isset( $_GET['media_type'] ) ? sanitize_key( $_GET['media_type'] ) : 'all';
+        $zero_traffic = ! empty( $_GET['zero_traffic'] ) ? 1 : 0;
+        $ga_synced    = (bool) get_option( self::OPTION_GA_LAST_SYNC, 0 );
 
         $results = $this->get_unused_attachments( array(
-            'confidence' => $confidence,
-            'type'       => $type_filter,
-            'per_page'   => 9999,
-            'page'       => 1,
+            'confidence'   => $confidence,
+            'type'         => $type_filter,
+            'per_page'     => 9999,
+            'page'         => 1,
+            'zero_traffic' => $zero_traffic,
         ) );
 
         header( 'Content-Type: text/csv; charset=UTF-8' );
@@ -2964,7 +3136,7 @@ JS;
         $out = fopen( 'php://output', 'w' );
         fprintf( $out, chr( 0xEF ) . chr( 0xBB ) . chr( 0xBF ) ); // UTF-8 BOM for Excel
 
-        fputcsv( $out, array(
+        $headers = array(
             __( 'ID', 'uwgs-alt-text-tool' ),
             __( 'Filename', 'uwgs-alt-text-tool' ),
             __( 'Title', 'uwgs-alt-text-tool' ),
@@ -2974,7 +3146,11 @@ JS;
             __( 'Upload Date', 'uwgs-alt-text-tool' ),
             __( 'Uploaded By', 'uwgs-alt-text-tool' ),
             __( 'Confidence', 'uwgs-alt-text-tool' ),
-        ) );
+        );
+        if ( $ga_synced ) {
+            $headers[] = __( 'GA Views', 'uwgs-alt-text-tool' );
+        }
+        fputcsv( $out, $headers );
 
         foreach ( $results['attachments'] as $attachment ) {
             $file_url  = wp_get_attachment_url( $attachment->ID );
@@ -2982,7 +3158,7 @@ JS;
             $file_size = get_post_meta( $attachment->ID, self::META_UNUSED_FILE_SIZE, true );
             $author    = get_userdata( $attachment->post_author );
 
-            fputcsv( $out, array(
+            $row = array(
                 $attachment->ID,
                 $file_url ? basename( $file_url ) : '',
                 $attachment->post_title,
@@ -2992,7 +3168,12 @@ JS;
                 get_the_date( 'Y-m-d', $attachment->ID ),
                 $author ? $author->display_name : '',
                 $status,
-            ) );
+            );
+            if ( $ga_synced ) {
+                $ga_synced_at = get_post_meta( $attachment->ID, self::META_GA_SYNCED_AT, true );
+                $row[]        = $ga_synced_at !== '' ? (int) get_post_meta( $attachment->ID, self::META_GA_PAGEVIEWS, true ) : '';
+            }
+            fputcsv( $out, $row );
         }
 
         fclose( $out );
@@ -3108,6 +3289,258 @@ JS;
         wp_register_script( 'uwgs-unused', plugins_url( 'js/uwgs-unused.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
         wp_enqueue_script( 'uwgs-unused' );
         wp_add_inline_script( 'uwgs-unused', 'var uwgsUnusedData = ' . wp_json_encode( $data ) . ';', 'before' );
+    }
+
+    // =========================================================================
+    // GOOGLE ANALYTICS: SETTINGS, AUTH, AND SYNC
+    // =========================================================================
+
+    private function get_ga4_property_id_from_site_kit() {
+        $options = get_option( 'googlesitekit_analytics-4_settings', array() );
+        return isset( $options['propertyID'] ) ? (string) $options['propertyID'] : '';
+    }
+
+    private function store_service_account_json( $json ) {
+        if ( function_exists( 'openssl_encrypt' ) ) {
+            $key = substr( hash( 'sha256', wp_salt( 'auth' ) ), 0, 32 );
+            $iv  = openssl_random_pseudo_bytes( 16 );
+            $enc = openssl_encrypt( $json, 'AES-256-CBC', $key, 0, $iv );
+            update_option( self::OPTION_GA_SERVICE_ACCOUNT, base64_encode( $iv . ':' . $enc ) );
+        } else {
+            update_option( self::OPTION_GA_SERVICE_ACCOUNT, base64_encode( $json ) );
+        }
+    }
+
+    private function get_service_account_json() {
+        $stored = get_option( self::OPTION_GA_SERVICE_ACCOUNT, '' );
+        if ( empty( $stored ) ) { return ''; }
+        $raw = base64_decode( $stored );
+        if ( function_exists( 'openssl_decrypt' ) && strpos( $raw, ':' ) !== false ) {
+            $sep = strpos( $raw, ':' );
+            $iv  = substr( $raw, 0, $sep );
+            $enc = substr( $raw, $sep + 1 );
+            $key = substr( hash( 'sha256', wp_salt( 'auth' ) ), 0, 32 );
+            $dec = openssl_decrypt( $enc, 'AES-256-CBC', $key, 0, $iv );
+            if ( false !== $dec ) { return $dec; }
+        }
+        return $raw; // fallback: plain base64
+    }
+
+    private function ga4_build_jwt( $client_email, $private_key ) {
+        if ( ! function_exists( 'openssl_sign' ) ) {
+            return new WP_Error( 'no_openssl', __( 'OpenSSL extension is required for GA4 authentication.', 'uwgs-alt-text-tool' ) );
+        }
+        $b64url = function( $data ) {
+            return rtrim( strtr( base64_encode( $data ), '+/', '-_' ), '=' );
+        };
+        $now    = time();
+        $header = $b64url( wp_json_encode( array( 'alg' => 'RS256', 'typ' => 'JWT' ) ) );
+        $claims = $b64url( wp_json_encode( array(
+            'iss'   => $client_email,
+            'scope' => 'https://www.googleapis.com/auth/analytics.readonly',
+            'aud'   => 'https://oauth2.googleapis.com/token',
+            'exp'   => $now + 3600,
+            'iat'   => $now,
+        ) ) );
+        $input = $header . '.' . $claims;
+        $sig   = '';
+        if ( ! openssl_sign( $input, $sig, $private_key, OPENSSL_ALGO_SHA256 ) ) {
+            return new WP_Error( 'sign_error', __( 'Could not sign JWT — verify the service account private key.', 'uwgs-alt-text-tool' ) );
+        }
+        return $input . '.' . $b64url( $sig );
+    }
+
+    private function get_ga4_access_token() {
+        $json = $this->get_service_account_json();
+        if ( empty( $json ) ) {
+            return new WP_Error( 'no_credentials', __( 'No service account credentials configured.', 'uwgs-alt-text-tool' ) );
+        }
+        $creds = json_decode( $json, true );
+        if ( ! is_array( $creds ) || empty( $creds['client_email'] ) || empty( $creds['private_key'] ) ) {
+            return new WP_Error( 'invalid_credentials', __( 'Service account JSON is invalid or incomplete.', 'uwgs-alt-text-tool' ) );
+        }
+        $jwt = $this->ga4_build_jwt( $creds['client_email'], $creds['private_key'] );
+        if ( is_wp_error( $jwt ) ) { return $jwt; }
+
+        $response = wp_remote_post( 'https://oauth2.googleapis.com/token', array(
+            'body'    => array(
+                'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                'assertion'  => $jwt,
+            ),
+            'timeout' => 20,
+        ) );
+        if ( is_wp_error( $response ) ) { return $response; }
+
+        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+        if ( empty( $body['access_token'] ) ) {
+            $msg = ! empty( $body['error_description'] ) ? $body['error_description']
+                 : ( ! empty( $body['error'] ) ? $body['error'] : 'Token exchange failed.' );
+            return new WP_Error( 'token_error', $msg );
+        }
+        return $body['access_token'];
+    }
+
+    private function sync_ga4_data( $access_token, $property_id, $window_days ) {
+        global $wpdb;
+
+        $property_id = preg_replace( '/^(properties\/|G-)/i', '', trim( $property_id ) );
+
+        $upload_dir       = wp_upload_dir();
+        $uploads_url_path = parse_url( $upload_dir['baseurl'], PHP_URL_PATH );
+
+        $response = wp_remote_post(
+            'https://analyticsdata.googleapis.com/v1beta/properties/' . rawurlencode( $property_id ) . ':runReport',
+            array(
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $access_token,
+                    'Content-Type'  => 'application/json',
+                ),
+                'body'    => wp_json_encode( array(
+                    'dateRanges'      => array( array( 'startDate' => $window_days . 'daysAgo', 'endDate' => 'today' ) ),
+                    'dimensions'      => array( array( 'name' => 'pagePath' ) ),
+                    'metrics'         => array( array( 'name' => 'screenPageViews' ) ),
+                    'dimensionFilter' => array(
+                        'filter' => array(
+                            'fieldName'    => 'pagePath',
+                            'stringFilter' => array(
+                                'matchType' => 'CONTAINS',
+                                'value'     => $uploads_url_path . '/',
+                            ),
+                        ),
+                    ),
+                    'limit' => 250000,
+                ) ),
+                'timeout' => 30,
+            )
+        );
+
+        if ( is_wp_error( $response ) ) { return $response; }
+
+        $http_code = (int) wp_remote_retrieve_response_code( $response );
+        $data      = json_decode( wp_remote_retrieve_body( $response ), true );
+
+        if ( $http_code !== 200 ) {
+            $msg = ! empty( $data['error']['message'] ) ? $data['error']['message'] : "GA4 API returned HTTP {$http_code}.";
+            return new WP_Error( 'api_error', $msg );
+        }
+
+        // Build page-path → view-count map
+        $path_views = array();
+        foreach ( (array) ( isset( $data['rows'] ) ? $data['rows'] : array() ) as $row ) {
+            $path  = strtok( $row['dimensionValues'][0]['value'], '?' );
+            $views = (int) $row['metricValues'][0]['value'];
+            $path_views[ $path ] = ( isset( $path_views[ $path ] ) ? $path_views[ $path ] : 0 ) + $views;
+        }
+
+        // Store pageview counts for all attachments
+        $att_rows = $wpdb->get_results(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_type = 'attachment' AND post_status = 'inherit'"
+        );
+        $now     = time();
+        $synced  = 0;
+        $matched = 0;
+        foreach ( (array) $att_rows as $row ) {
+            $id  = (int) $row->ID;
+            $url = wp_get_attachment_url( $id );
+            if ( ! $url ) { continue; }
+            $path  = parse_url( $url, PHP_URL_PATH );
+            $views = isset( $path_views[ $path ] ) ? $path_views[ $path ] : 0;
+            if ( $views > 0 ) { $matched++; }
+            update_post_meta( $id, self::META_GA_PAGEVIEWS, $views );
+            update_post_meta( $id, self::META_GA_SYNCED_AT, $now );
+            $synced++;
+        }
+
+        return array(
+            'synced'     => $synced,
+            'with_views' => $matched,
+            'ga_rows'    => count( $path_views ),
+        );
+    }
+
+    public function ajax_sync_ga4() {
+        check_ajax_referer( self::NONCE_GA_SYNC, 'nonce' );
+        if ( ! current_user_can( 'manage_options' ) ) { wp_send_json_error( 'Permission denied.' ); }
+
+        $property_id = get_option( self::OPTION_GA4_PROPERTY_ID, '' );
+        if ( empty( $property_id ) ) {
+            wp_send_json_error( __( 'No GA4 property ID configured.', 'uwgs-alt-text-tool' ) );
+        }
+
+        $token = $this->get_ga4_access_token();
+        if ( is_wp_error( $token ) ) { wp_send_json_error( $token->get_error_message() ); }
+
+        $window = (int) get_option( self::OPTION_GA_ANALYSIS_WINDOW, 90 );
+        $result = $this->sync_ga4_data( $token, $property_id, $window );
+        if ( is_wp_error( $result ) ) { wp_send_json_error( $result->get_error_message() ); }
+
+        update_option( self::OPTION_GA_LAST_SYNC, time() );
+        self::clear_unused_stats_cache();
+        wp_send_json_success( $result );
+    }
+
+    public function ajax_save_ga_settings() {
+        check_ajax_referer( self::NONCE_GA_SAVE, 'nonce' );
+        if ( ! current_user_can( 'manage_options' ) ) { wp_send_json_error( 'Permission denied.' ); }
+
+        $property_id = isset( $_POST['property_id'] ) ? sanitize_text_field( wp_unslash( $_POST['property_id'] ) ) : '';
+        $window      = isset( $_POST['window'] ) ? (int) $_POST['window'] : 90;
+        $sa_json     = isset( $_POST['service_account'] ) ? trim( wp_unslash( $_POST['service_account'] ) ) : '';
+        $remove_sa   = ! empty( $_POST['remove_sa'] );
+
+        if ( ! in_array( $window, array( 30, 60, 90, 180 ), true ) ) { $window = 90; }
+
+        $pid = preg_replace( '/^(properties\/|G-)/i', '', $property_id );
+        if ( $pid !== '' && ! preg_match( '/^\d+$/', $pid ) ) {
+            wp_send_json_error( __( 'Property ID must be numeric (e.g. 123456789).', 'uwgs-alt-text-tool' ) );
+        }
+        update_option( self::OPTION_GA4_PROPERTY_ID, $pid );
+        update_option( self::OPTION_GA_ANALYSIS_WINDOW, $window );
+
+        if ( $remove_sa ) {
+            delete_option( self::OPTION_GA_SERVICE_ACCOUNT );
+            delete_option( self::OPTION_GA_LAST_SYNC );
+        } elseif ( $sa_json !== '' ) {
+            $parsed = json_decode( $sa_json, true );
+            if ( ! is_array( $parsed ) || empty( $parsed['client_email'] ) || empty( $parsed['private_key'] ) ) {
+                wp_send_json_error( __( 'Invalid service account JSON — must include client_email and private_key.', 'uwgs-alt-text-tool' ) );
+            }
+            $this->store_service_account_json( $sa_json );
+        }
+
+        $stored_json = $this->get_service_account_json();
+        $sa_email    = '';
+        if ( ! empty( $stored_json ) ) {
+            $sa_data  = json_decode( $stored_json, true );
+            $sa_email = isset( $sa_data['client_email'] ) ? $sa_data['client_email'] : '';
+        }
+
+        wp_send_json_success( array(
+            'sa_email'    => $sa_email,
+            'property_id' => $pid,
+            'window'      => $window,
+            'ready'       => $sa_email !== '' && $pid !== '',
+        ) );
+    }
+
+    private function enqueue_settings_assets() {
+        wp_register_script( 'uwgs-ga-settings', plugins_url( 'js/uwgs-ga-settings.js', __FILE__ ), array( 'jquery' ), self::VERSION, true );
+        wp_enqueue_script( 'uwgs-ga-settings' );
+        wp_add_inline_script( 'uwgs-ga-settings', 'var uwgsGaSettingsData = ' . wp_json_encode( array(
+            'ajaxUrl'   => admin_url( 'admin-ajax.php' ),
+            'saveNonce' => wp_create_nonce( self::NONCE_GA_SAVE ),
+            'syncNonce' => wp_create_nonce( self::NONCE_GA_SYNC ),
+            'i18n'      => array(
+                'saving'        => __( 'Saving…', 'uwgs-alt-text-tool' ),
+                'saved'         => __( 'Settings saved.', 'uwgs-alt-text-tool' ),
+                'saveError'     => __( 'Error saving settings.', 'uwgs-alt-text-tool' ),
+                'syncing'       => __( 'Syncing GA4 data…', 'uwgs-alt-text-tool' ),
+                'syncDone'      => __( 'Sync complete — %1$d attachments updated, %2$d with traffic.', 'uwgs-alt-text-tool' ),
+                'syncError'     => __( 'Sync failed: ', 'uwgs-alt-text-tool' ),
+                'confirmRemove' => __( 'Remove service account credentials? This will also clear the last sync timestamp.', 'uwgs-alt-text-tool' ),
+            ),
+        ) ) . ';', 'before' );
     }
 
     // =========================================================================
