@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.5';
+    const VERSION                = '3.1.6';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3351,29 +3351,40 @@ JS;
     }
 
     private function get_site_kit_access_token() {
-        $users = get_users( array( 'role__in' => array( 'administrator' ), 'number' => -1, 'fields' => 'ID' ) );
-        // Prefer current user if they're an admin.
+        global $wpdb;
+        $users   = get_users( array( 'role__in' => array( 'administrator' ), 'number' => -1, 'fields' => 'ID' ) );
         $current = get_current_user_id();
         if ( $current && in_array( $current, $users, false ) ) {
             array_unshift( $users, $current );
             $users = array_unique( $users );
         }
+        if ( empty( $users ) ) { return 'DEBUG:no_admin_users'; }
         foreach ( $users as $uid ) {
-            $uid        = (int) $uid;
-            // Site Kit uses get_user_option() which applies the blog DB prefix on single-site.
-            $expires_in = (int) get_user_option( 'googlesitekit_access_token_expires_in', $uid );
-            $created_at = (int) get_user_option( 'googlesitekit_access_token_created_at', $uid );
-            $encrypted  = get_user_option( 'googlesitekit_access_token', $uid );
-            if ( ! $encrypted ) { continue; }
+            $uid = (int) $uid;
+            // Find actual Site Kit token meta key for this user (handles any prefix variant).
+            $row = $wpdb->get_row( $wpdb->prepare(
+                "SELECT meta_key, meta_value FROM {$wpdb->usermeta}
+                 WHERE user_id = %d AND meta_key LIKE %s LIMIT 1",
+                $uid, '%googlesitekit_access_token'
+            ) );
+            if ( ! $row ) { continue; }
+            // Check expiry using the same meta_key prefix we just discovered.
+            $prefix       = str_replace( 'googlesitekit_access_token', '', $row->meta_key );
+            $expires_in   = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_expires_in', true );
+            $created_at   = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_created_at', true );
             if ( $created_at && $created_at + $expires_in - 60 < time() ) {
-                // Token is expired — try to return a debug hint rather than silently skipping.
-                return 'EXPIRED:' . $uid . ':' . $created_at . ':' . ( $created_at + $expires_in ) . ':now=' . time();
+                return 'EXPIRED:uid=' . $uid . ',created=' . $created_at . ',expires=' . ( $created_at + $expires_in ) . ',now=' . time() . ',key=' . $row->meta_key;
             }
-            $token = $this->decrypt_site_kit_value( $encrypted );
+            $token = $this->decrypt_site_kit_value( $row->meta_value );
             if ( $token ) { return $token; }
-            return 'DECRYPT_FAIL:uid=' . $uid;
+            return 'DECRYPT_FAIL:uid=' . $uid . ',key=' . $row->meta_key . ',val_len=' . strlen( $row->meta_value );
         }
-        return null;
+        // None of the admins had a token — report actual keys stored for current user.
+        $keys = $wpdb->get_col( $wpdb->prepare(
+            "SELECT meta_key FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key LIKE %s",
+            $current ?: ( $users[0] ?? 0 ), '%googlesitekit%'
+        ) );
+        return 'DEBUG:no_token_found,uid=' . $current . ',sk_keys=' . implode( '|', $keys );
     }
 
     private function decrypt_site_kit_value( $raw_value ) {
