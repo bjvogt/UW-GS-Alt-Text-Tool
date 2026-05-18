@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.9';
+    const VERSION                = '3.1.10';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3351,9 +3351,12 @@ JS;
     }
 
     private function get_site_kit_access_token() {
+        $result = $this->get_site_kit_access_token_debug();
+        return $result['token'] ?? null;
+    }
+
+    private function get_site_kit_access_token_debug() {
         global $wpdb;
-        // Search all users for a Site Kit access token — the connected user may not have
-        // the administrator role (e.g. Pantheon machine user). Prefer current user first.
         $current = get_current_user_id();
         $rows    = $wpdb->get_results(
             "SELECT user_id, meta_key, meta_value FROM {$wpdb->usermeta}
@@ -3361,46 +3364,45 @@ JS;
              ORDER BY FIELD(user_id, " . (int) $current . ") DESC, umeta_id DESC
              LIMIT 10"
         );
-        if ( empty( $rows ) ) { return null; }
+        if ( empty( $rows ) ) { return array( 'debug' => 'no_rows' ); }
+
         foreach ( $rows as $row ) {
             $uid        = (int) $row->user_id;
             $prefix     = str_replace( 'googlesitekit_access_token', '', $row->meta_key );
             $expires_in = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_expires_in', true );
             $created_at = (int) get_user_meta( $uid, $prefix . 'googlesitekit_access_token_created_at', true );
-            $is_expired = $created_at && $created_at + $expires_in - 60 < time();
+            $is_expired = $created_at && ( $created_at + $expires_in - 60 < time() );
+
             if ( ! $is_expired ) {
                 $token = $this->decrypt_site_kit_value( $row->meta_value );
-                if ( $token ) { return $token; }
+                if ( $token ) { return array( 'token' => $token ); }
+                return array( 'debug' => 'decrypt_fail,uid=' . $uid . ',key=' . $row->meta_key );
             }
+
             // Token expired — try refreshing via Site Kit's OAuth proxy.
-            $refreshed = $this->refresh_site_kit_token( $uid, $prefix );
-            if ( $refreshed ) { return $refreshed; }
+            $debug    = 'expired,uid=' . $uid . ',created=' . $created_at . ',exp=' . ( $created_at + $expires_in ) . ',now=' . time();
+            $enc_ref  = get_user_meta( $uid, $prefix . 'googlesitekit_refresh_token', true );
+            if ( ! $enc_ref ) { return array( 'debug' => $debug . ',no_refresh_meta' ); }
+            $ref_tok  = $this->decrypt_site_kit_value( $enc_ref );
+            if ( ! $ref_tok ) { return array( 'debug' => $debug . ',refresh_decrypt_fail' ); }
+            $creds     = get_option( 'googlesitekit_credentials', array() );
+            $client_id = ! empty( $creds['oauth2_client_id'] ) ? $creds['oauth2_client_id'] : '';
+            if ( ! $client_id ) { return array( 'debug' => $debug . ',no_client_id,creds_keys=' . implode( '|', array_keys( (array) $creds ) ) ); }
+            $resp = wp_remote_post( 'https://sitekit.withgoogle.com/o/oauth2/token/', array(
+                'body'    => array_filter( array(
+                    'grant_type'    => 'refresh_token',
+                    'refresh_token' => $ref_tok,
+                    'client_id'     => $client_id,
+                    'client_secret' => ! empty( $creds['oauth2_client_secret'] ) ? $creds['oauth2_client_secret'] : '',
+                ) ),
+                'timeout' => 15,
+            ) );
+            if ( is_wp_error( $resp ) ) { return array( 'debug' => $debug . ',http_err=' . $resp->get_error_message() ); }
+            $body = json_decode( wp_remote_retrieve_body( $resp ), true );
+            if ( ! empty( $body['access_token'] ) ) { return array( 'token' => $body['access_token'] ); }
+            return array( 'debug' => $debug . ',proxy_resp=' . wp_remote_retrieve_response_code( $resp ) . ':' . wp_json_encode( $body ) );
         }
-        return null;
-    }
-
-    private function refresh_site_kit_token( $uid, $meta_prefix ) {
-        $enc_refresh = get_user_meta( $uid, $meta_prefix . 'googlesitekit_refresh_token', true );
-        if ( ! $enc_refresh ) { return null; }
-        $refresh_token = $this->decrypt_site_kit_value( $enc_refresh );
-        if ( ! $refresh_token ) { return null; }
-
-        $creds     = get_option( 'googlesitekit_credentials', array() );
-        $client_id = ! empty( $creds['oauth2_client_id'] ) ? $creds['oauth2_client_id'] : '';
-        if ( ! $client_id ) { return null; }
-
-        $response = wp_remote_post( 'https://sitekit.withgoogle.com/o/oauth2/token/', array(
-            'body'    => array_filter( array(
-                'grant_type'    => 'refresh_token',
-                'refresh_token' => $refresh_token,
-                'client_id'     => $client_id,
-                'client_secret' => ! empty( $creds['oauth2_client_secret'] ) ? $creds['oauth2_client_secret'] : '',
-            ) ),
-            'timeout' => 15,
-        ) );
-        if ( is_wp_error( $response ) ) { return null; }
-        $body = json_decode( wp_remote_retrieve_body( $response ), true );
-        return ! empty( $body['access_token'] ) ? $body['access_token'] : null;
+        return array( 'debug' => 'no_token_found' );
     }
 
     private function decrypt_site_kit_value( $raw_value ) {
@@ -3424,13 +3426,13 @@ JS;
 
     private function get_ga4_access_token() {
         // Prefer Site Kit's live OAuth token — no service account needed.
-        $site_kit_token = $this->get_site_kit_access_token();
-        if ( $site_kit_token ) { return $site_kit_token; }
+        $site_kit_result = $this->get_site_kit_access_token_debug();
+        if ( isset( $site_kit_result['token'] ) ) { return $site_kit_result['token']; }
 
         // Fall back to configured service account.
         $json = $this->get_service_account_json();
         if ( empty( $json ) ) {
-            return new WP_Error( 'no_credentials', __( 'No credentials available. Connect Google Site Kit or configure a service account.', 'uwgs-alt-text-tool' ) );
+            return new WP_Error( 'no_credentials', 'SK debug: ' . ( $site_kit_result['debug'] ?? 'none' ) );
         }
         $creds = json_decode( $json, true );
         if ( ! is_array( $creds ) || empty( $creds['client_email'] ) || empty( $creds['private_key'] ) ) {
