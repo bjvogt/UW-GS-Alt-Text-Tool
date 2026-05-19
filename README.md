@@ -124,6 +124,21 @@ When alt text is blank and no caption exists, the plugin can suggest a cleaned-u
 
 Items found only in trashed posts or ambiguous serialized data are marked **Uncertain** rather than **Unused**.
 
+### Recommended workflow on Pantheon
+
+**Trashing** (`Move to Trash` in the UI) calls `wp_trash_post()` — a database-only operation. No files are touched. This is safe to run on any Pantheon environment including live.
+
+**Permanent deletion** (emptying the trash via Media > Library > Trash) removes the physical files from `/wp-content/uploads/`. That directory is on a writable NFS mount on all Pantheon environments, so it works on live — but the files are gone for good. There is no undo beyond a backup restore.
+
+The important constraint is **environment isolation**: each Pantheon environment (dev/test/live) has its own database and its own uploads filesystem. They are not shared. This means:
+
+1. Run the scan on **live** — that's the only environment with the real production database and real upload files.
+2. Review results and move items to Trash on live.
+3. Let items sit in trash for your comfort window (WordPress keeps them for 30 days by default).
+4. Empty trash via Media > Library > Trash, or with WP-CLI: `terminus wp <site>.live -- post delete $(terminus wp <site>.live -- post list --post_type=attachment --post_status=trash --format=ids)`
+
+Do not run the scan on test and then trash on live — the databases are different and attachment IDs will not correspond.
+
 ### postmeta keys
 
 | Key | Values |
