@@ -209,10 +209,23 @@ JavaScript save calls are REST-first with an `admin-ajax.php` fallback for compa
 This plugin lives inside a larger monorepo. To push the latest commits to the standalone GitHub repo:
 
 ```bash
-git subtree push --prefix=wp-content/plugins/uwgs-alt-text-tool plugin-repo main
+git push-plugin
 ```
 
-If the remote doesn't exist yet: `git remote add plugin-repo https://github.com/bjvogt/UW-GS-Alt-Text-Tool.git`
+This is a git alias for:
+
+```bash
+git subtree push --prefix=wp-content/plugins/uwgs-alt-text-tool plugin-repo main --rejoin
+```
+
+The `--rejoin` flag records a merge commit that marks the split point, so each push only processes new commits rather than re-walking the full history.
+
+If the alias or remote aren't set up yet:
+
+```bash
+git remote add plugin-repo https://github.com/bjvogt/UW-GS-Alt-Text-Tool.git
+git config alias.push-plugin "subtree push --prefix=wp-content/plugins/uwgs-alt-text-tool plugin-repo main --rejoin"
+```
 
 ### Known edge cases
 - ACF gallery and multi-image fields that store comma-separated IDs may not parse correctly
