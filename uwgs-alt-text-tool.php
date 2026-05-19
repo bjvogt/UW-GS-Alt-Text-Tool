@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           3.2.0
+ * Version:           3.2.1
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.2.0';
+    const VERSION                = '3.2.1';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -3710,14 +3710,33 @@ JS;
         }
 
         $token = $this->get_ga4_access_token();
-        if ( is_wp_error( $token ) ) { wp_send_json_error( $token->get_error_message() ); }
+        if ( is_wp_error( $token ) ) {
+            $this->log_to_stream(
+                sprintf( __( 'Manual GA4 sync failed: %s', 'uwgs-alt-text-tool' ), $token->get_error_message() ),
+                'ga4', 'sync_failed'
+            );
+            wp_send_json_error( $token->get_error_message() );
+        }
 
         $window = (int) get_option( self::OPTION_GA_ANALYSIS_WINDOW, 90 );
         $result = $this->sync_ga4_data( $token, $property_id, $window );
-        if ( is_wp_error( $result ) ) { wp_send_json_error( $result->get_error_message() ); }
+        if ( is_wp_error( $result ) ) {
+            $this->log_to_stream(
+                sprintf( __( 'Manual GA4 sync failed: %s', 'uwgs-alt-text-tool' ), $result->get_error_message() ),
+                'ga4', 'sync_failed'
+            );
+            wp_send_json_error( $result->get_error_message() );
+        }
 
         update_option( self::OPTION_GA_LAST_SYNC, time() );
         self::clear_unused_stats_cache();
+        $this->log_to_stream(
+            sprintf(
+                __( 'Manual GA4 sync complete: %1$d attachments updated, %2$d with traffic.', 'uwgs-alt-text-tool' ),
+                $result['synced'], $result['with_views']
+            ),
+            'ga4', 'synced'
+        );
         wp_send_json_success( $result );
     }
 
