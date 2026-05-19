@@ -10,7 +10,7 @@
  *                    Updates upload status messages to prompt alt text entry. Shows a dashboard
  *                    widget with alt text coverage stats. Supports bulk application of high-confidence
  *                    alt text suggestions. Built for UW Graduate School.
- * Version:           3.1.0
+ * Version:           3.2.0
  * Author:            UW Graduate School
  * Author URI:        https://grad.uw.edu
  * License:           GPL-2.0+
@@ -170,7 +170,7 @@ class UWGS_Alt_Text_Tool {
     const META_UNUSED_FILE_SIZE  = '_uwgs_unused_file_size';
     const META_GA_PAGEVIEWS      = '_uwgs_ga_pageviews';
     const META_GA_SYNCED_AT      = '_uwgs_ga_synced_at';
-    const VERSION                = '3.1.11';
+    const VERSION                = '3.2.0';
     const BULK_CONFIRM_THRESHOLD = 20;
     const OPTION_INSTRUCTIONS    = 'uwgs_alt_text_instructions';
     const OPTION_UNUSED_SCOPE    = 'uwgs_unused_scope';
@@ -179,8 +179,13 @@ class UWGS_Alt_Text_Tool {
     const OPTION_GA_SERVICE_ACCOUNT = 'uwgs_ga_service_account_json';
     const OPTION_GA_ANALYSIS_WINDOW = 'uwgs_ga_analysis_window';
     const OPTION_GA_LAST_SYNC     = 'uwgs_ga_last_sync';
-    const NONCE_GA_SYNC           = 'uwgs_ga_sync';
-    const NONCE_GA_SAVE           = 'uwgs_save_ga_settings';
+    const NONCE_GA_SYNC               = 'uwgs_ga_sync';
+    const NONCE_GA_SAVE               = 'uwgs_save_ga_settings';
+    const OPTION_CRON_ENABLED         = 'uwgs_cron_enabled';
+    const META_UNUSED_FIRST_SEEN      = '_uwgs_unused_first_seen';
+    const OPTION_UNUSED_NEW_COUNT     = 'uwgs_unused_new_count';
+    const OPTION_UNUSED_NEW_SCAN_TIME = 'uwgs_unused_new_scan_time';
+    const CRON_HOOK                   = 'uwgs_scheduled_scan';
 
     const LOW_QUALITY_WORDS = array(
         'image', 'photo', 'img', 'picture', 'screenshot',
@@ -230,6 +235,9 @@ class UWGS_Alt_Text_Tool {
         add_action( 'admin_notices',                   array( $this, 'render_unused_scan_notice' ) );
         add_action( 'wp_ajax_uwgs_sync_ga4',           array( $this, 'ajax_sync_ga4' ) );
         add_action( 'wp_ajax_uwgs_save_ga_settings',   array( $this, 'ajax_save_ga_settings' ) );
+        // Scheduled scan
+        add_action( self::CRON_HOOK,    array( $this, 'run_scheduled_scan' ) );
+        add_action( 'admin_init',       array( $this, 'maybe_reschedule_cron' ) );
         add_filter( 'set_screen_option_uwgs_unused_per_page', function( $status, $option, $value ) {
             return max( 1, (int) $value );
         }, 10, 3 );
@@ -1996,8 +2004,10 @@ JS;
                 'default'           => 'all',
             )
         );
+        register_setting( 'uwgs_unused_settings', self::OPTION_CRON_ENABLED, array( 'type' => 'integer', 'default' => 0 ) );
         add_settings_section( 'uwgs_unused_main', '', '__return_false', 'uwgs-unused-settings' );
-        add_settings_field( 'uwgs_unused_scope', __( 'Scan scope', 'uwgs-alt-text-tool' ), array( $this, 'render_unused_scope_field' ), 'uwgs-unused-settings', 'uwgs_unused_main' );
+        add_settings_field( 'uwgs_unused_scope',   __( 'Scan scope', 'uwgs-alt-text-tool' ),       array( $this, 'render_unused_scope_field' ),   'uwgs-unused-settings', 'uwgs_unused_main' );
+        add_settings_field( 'uwgs_cron_enabled',   __( 'Scheduled scan', 'uwgs-alt-text-tool' ),   array( $this, 'render_cron_enabled_field' ),   'uwgs-unused-settings', 'uwgs_unused_main' );
     }
 
     public function render_unused_scope_field() {
@@ -2007,6 +2017,29 @@ JS;
         echo '<label><input type="radio" name="' . esc_attr( self::OPTION_UNUSED_SCOPE ) . '" value="images"' . checked( $value, 'images', false ) . '> ' . esc_html__( 'Images only', 'uwgs-alt-text-tool' ) . '</label>';
         echo '</fieldset>';
         echo '<p class="description">' . esc_html__( 'Controls which attachment types are included when scanning for unused media.', 'uwgs-alt-text-tool' ) . '</p>';
+    }
+
+    public function render_cron_enabled_field() {
+        $enabled    = (bool) get_option( self::OPTION_CRON_ENABLED, 0 );
+        $last_cron  = get_option( 'uwgs_last_cron_scan', 0 );
+        $stream_ok  = $this->stream_is_active();
+        echo '<label><input type="checkbox" name="' . esc_attr( self::OPTION_CRON_ENABLED ) . '" value="1"' . checked( $enabled, true, false ) . '> ';
+        esc_html_e( 'Run a full scan automatically every week (Sundays at 2 am)', 'uwgs-alt-text-tool' );
+        echo '</label>';
+        if ( $last_cron ) {
+            echo '<p class="description">' . sprintf(
+                esc_html__( 'Last scheduled scan: %s', 'uwgs-alt-text-tool' ),
+                esc_html( wp_date( get_option( 'date_format' ) . ' \a\t ' . get_option( 'time_format' ), $last_cron ) )
+            ) . '</p>';
+        } else {
+            echo '<p class="description">' . esc_html__( 'No scheduled scan has run yet.', 'uwgs-alt-text-tool' ) . '</p>';
+        }
+        if ( ! $stream_ok ) {
+            echo '<p class="description" style="color:#b32d2e;">' . wp_kses(
+                __( '<strong>Stream plugin not active.</strong> Install and activate <a href="https://wordpress.org/plugins/stream/" target="_blank">WP Stream</a> to receive scan activity log entries.', 'uwgs-alt-text-tool' ),
+                array( 'strong' => array(), 'a' => array( 'href' => array(), 'target' => array() ) )
+            ) . '</p>';
+        }
     }
 
     public function render_instructions_field() {
@@ -3180,86 +3213,246 @@ JS;
         exit;
     }
 
-    public function ajax_dismiss_scan_notice() {
-        check_ajax_referer( self::NONCE_UNUSED_ACTION, 'nonce' );
-        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Permission denied.' ); }
-        update_user_meta( get_current_user_id(), '_uwgs_scan_notice_dismissed', get_option( self::OPTION_UNUSED_LAST_SCAN, 0 ) );
-        wp_send_json_success();
+    // =========================================================================
+    // UNUSED MEDIA: ADMIN NOTICE + STREAM + SCHEDULED SCAN
+    // =========================================================================
+
+    private function stream_is_active() {
+        return class_exists( 'WP_Stream\Plugin' ) || function_exists( 'wp_stream_get_instance' );
     }
 
-    // =========================================================================
-    // UNUSED MEDIA: ADMIN NOTICE + STREAM
-    // =========================================================================
+    private function log_to_stream( $message, $context = 'general', $action = 'updated' ) {
+        if ( ! $this->stream_is_active() ) { return; }
+        // WP Stream accepts records via wp_stream_log_data action (all active versions).
+        do_action( 'wp_stream_log_data', null, array(
+            'connector' => 'uwgs-media-tool',
+            'message'   => $message,
+            'args'      => array(),
+            'object_id' => null,
+            'context'   => $context,
+            'action'    => $action,
+        ) );
+    }
+
+    public function maybe_reschedule_cron() {
+        $enabled   = (bool) get_option( self::OPTION_CRON_ENABLED, 0 );
+        $scheduled = (bool) wp_next_scheduled( self::CRON_HOOK );
+        if ( $enabled && ! $scheduled ) {
+            // Schedule for next Sunday 2am server time.
+            $next = strtotime( 'next Sunday 02:00:00' );
+            wp_schedule_event( $next, 'weekly', self::CRON_HOOK );
+        } elseif ( ! $enabled && $scheduled ) {
+            wp_clear_scheduled_hook( self::CRON_HOOK );
+        }
+    }
+
+    public static function deactivate() {
+        wp_clear_scheduled_hook( self::CRON_HOOK );
+    }
+
+    public function run_scheduled_scan() {
+        @set_time_limit( 0 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+        global $wpdb;
+
+        $scan_time = time();
+        $scope     = get_option( self::OPTION_UNUSED_SCOPE, 'all' );
+        $mime_clause = ( $scope === 'images' ) ? "AND post_mime_type LIKE 'image/%'" : '';
+
+        $in_use_index = $this->build_in_use_index();
+        $theme_index  = $this->build_theme_index();
+
+        $ids = $wpdb->get_col(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_type = 'attachment' AND post_status = 'inherit' {$mime_clause}
+             ORDER BY ID ASC"
+        );
+
+        $new_count = 0;
+        foreach ( $ids as $raw_id ) {
+            $att_id  = (int) $raw_id;
+            $current = get_post_meta( $att_id, self::META_UNUSED_STATUS, true );
+            if ( $current === 'excluded' ) { continue; }
+
+            $new_status = $this->scan_attachment_status( $att_id, $in_use_index, $theme_index );
+            update_post_meta( $att_id, self::META_UNUSED_STATUS, $new_status );
+
+            // Cache file size
+            $meta = wp_get_attachment_metadata( $att_id );
+            if ( isset( $meta['filesize'] ) ) {
+                update_post_meta( $att_id, self::META_UNUSED_FILE_SIZE, (int) $meta['filesize'] );
+            }
+
+            // Track items newly flagged as unused/uncertain this scan.
+            if ( in_array( $new_status, array( 'unused', 'uncertain' ), true ) ) {
+                $first_seen = get_post_meta( $att_id, self::META_UNUSED_FIRST_SEEN, true );
+                if ( ! $first_seen ) {
+                    update_post_meta( $att_id, self::META_UNUSED_FIRST_SEEN, $scan_time );
+                    $new_count++;
+                }
+            } elseif ( $new_status === 'in_use' ) {
+                // Item is now in use — clear first-seen so it can be re-flagged later.
+                delete_post_meta( $att_id, self::META_UNUSED_FIRST_SEEN );
+            }
+        }
+
+        // Persist scan results.
+        update_option( self::OPTION_UNUSED_LAST_SCAN, $scan_time );
+        update_option( 'uwgs_last_cron_scan', $scan_time );
+        self::clear_unused_stats_cache();
+
+        // Set per-admin notice flags only when new items were found.
+        if ( $new_count > 0 ) {
+            update_option( self::OPTION_UNUSED_NEW_COUNT, $new_count );
+            update_option( self::OPTION_UNUSED_NEW_SCAN_TIME, $scan_time );
+            $this->reset_cron_notice_flags();
+        }
+
+        // Build summary for Stream.
+        $stats   = $this->get_unused_stats();
+        $message = sprintf(
+            /* translators: 1: unused, 2: uncertain, 3: new items */
+            __( 'Scheduled unused media scan complete: %1$d unused, %2$d uncertain, %3$d newly flagged.', 'uwgs-alt-text-tool' ),
+            $stats['unused'], $stats['uncertain'], $new_count
+        );
+        $this->log_to_stream( $message, 'scan', 'scanned' );
+
+        // Attempt GA4 sync; log result.
+        $property_id = get_option( self::OPTION_GA4_PROPERTY_ID, '' );
+        if ( $property_id ) {
+            $token = $this->get_ga4_access_token();
+            if ( is_wp_error( $token ) ) {
+                $this->log_to_stream(
+                    sprintf( __( 'Scheduled GA4 sync failed: %s', 'uwgs-alt-text-tool' ), $token->get_error_message() ),
+                    'ga4', 'sync_failed'
+                );
+            } else {
+                $window = (int) get_option( self::OPTION_GA_ANALYSIS_WINDOW, 90 );
+                $result = $this->sync_ga4_data( $token, $property_id, $window );
+                if ( is_wp_error( $result ) ) {
+                    $this->log_to_stream(
+                        sprintf( __( 'Scheduled GA4 sync failed: %s', 'uwgs-alt-text-tool' ), $result->get_error_message() ),
+                        'ga4', 'sync_failed'
+                    );
+                } else {
+                    update_option( self::OPTION_GA_LAST_SYNC, time() );
+                    $this->log_to_stream(
+                        sprintf(
+                            /* translators: 1: attachments, 2: with traffic */
+                            __( 'Scheduled GA4 sync complete: %1$d attachments updated, %2$d with traffic.', 'uwgs-alt-text-tool' ),
+                            $result['synced'], $result['with_views']
+                        ),
+                        'ga4', 'synced'
+                    );
+                }
+            }
+        }
+    }
+
+    private function reset_cron_notice_flags() {
+        global $wpdb;
+        $wpdb->delete( $wpdb->usermeta, array( 'meta_key' => '_uwgs_cron_notice_dismissed' ), array( '%s' ) );
+    }
 
     public function render_unused_scan_notice() {
         if ( ! current_user_can( 'upload_files' ) ) { return; }
-        $last_scan = get_option( self::OPTION_UNUSED_LAST_SCAN, 0 );
-        if ( ! $last_scan ) { return; }
-        $dismissed = (int) get_user_meta( get_current_user_id(), '_uwgs_scan_notice_dismissed', true );
-        if ( $dismissed >= $last_scan ) { return; }
-
-        // Only show on admin pages, not on the unused media page itself
         $screen = get_current_screen();
         if ( $screen && $screen->id === 'media_page_uwgs-unused-media' ) { return; }
 
-        $stats  = $this->get_unused_stats();
-        $total  = $stats['unused'] + $stats['uncertain'];
+        $uid          = get_current_user_id();
+        $new_count    = (int) get_option( self::OPTION_UNUSED_NEW_COUNT, 0 );
+        $new_time     = (int) get_option( self::OPTION_UNUSED_NEW_SCAN_TIME, 0 );
+        $cron_dismiss = (int) get_user_meta( $uid, '_uwgs_cron_notice_dismissed', true );
+
+        // Scheduled-scan notice: only when new items were found and not yet dismissed.
+        if ( $new_count > 0 && $new_time > $cron_dismiss ) {
+            $nonce = wp_create_nonce( self::NONCE_UNUSED_ACTION );
+            $url   = admin_url( 'upload.php?page=uwgs-unused-media' );
+            ?>
+            <div class="notice notice-warning is-dismissible" id="uwgs-scan-notice" data-nonce="<?php echo esc_attr( $nonce ); ?>" data-dismiss-type="cron">
+                <p><?php printf(
+                    esc_html__( 'Scheduled media scan (%1$s): %2$s new unused items found. %3$s', 'uwgs-alt-text-tool' ),
+                    esc_html( wp_date( get_option( 'date_format' ), $new_time ) ),
+                    '<strong>' . esc_html( number_format_i18n( $new_count ) ) . '</strong>',
+                    '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Review unused media →', 'uwgs-alt-text-tool' ) . '</a>'
+                ); ?></p>
+            </div>
+            <?php
+            $this->render_scan_notice_script();
+            return;
+        }
+
+        // Manual-scan fallback notice: show after any scan with unused items.
+        $last_scan = get_option( self::OPTION_UNUSED_LAST_SCAN, 0 );
+        if ( ! $last_scan ) { return; }
+        $dismissed = (int) get_user_meta( $uid, '_uwgs_scan_notice_dismissed', true );
+        if ( $dismissed >= $last_scan ) { return; }
+        $stats = $this->get_unused_stats();
+        $total = $stats['unused'] + $stats['uncertain'];
         if ( $total === 0 ) { return; }
 
         $nonce = wp_create_nonce( self::NONCE_UNUSED_ACTION );
         $url   = admin_url( 'upload.php?page=uwgs-unused-media' );
         ?>
-        <div class="notice notice-warning is-dismissible" id="uwgs-scan-notice" data-nonce="<?php echo esc_attr( $nonce ); ?>">
-            <p>
-                <?php printf(
-                    esc_html__( 'Unused media scan (%1$s): %2$s items flagged as potentially unused. %3$s', 'uwgs-alt-text-tool' ),
-                    esc_html( wp_date( get_option( 'date_format' ), $last_scan ) ),
-                    '<strong>' . esc_html( number_format_i18n( $total ) ) . '</strong>',
-                    '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Review unused media →', 'uwgs-alt-text-tool' ) . '</a>'
-                ); ?>
-            </p>
+        <div class="notice notice-warning is-dismissible" id="uwgs-scan-notice" data-nonce="<?php echo esc_attr( $nonce ); ?>" data-dismiss-type="manual">
+            <p><?php printf(
+                esc_html__( 'Unused media scan (%1$s): %2$s items flagged as potentially unused. %3$s', 'uwgs-alt-text-tool' ),
+                esc_html( wp_date( get_option( 'date_format' ), $last_scan ) ),
+                '<strong>' . esc_html( number_format_i18n( $total ) ) . '</strong>',
+                '<a href="' . esc_url( $url ) . '">' . esc_html__( 'Review unused media →', 'uwgs-alt-text-tool' ) . '</a>'
+            ); ?></p>
         </div>
+        <?php
+        $this->render_scan_notice_script();
+    }
+
+    private function render_scan_notice_script() {
+        $ajax_url = admin_url( 'admin-ajax.php' );
+        ?>
         <script>
         ( function() {
             var notice = document.getElementById( 'uwgs-scan-notice' );
             if ( ! notice ) { return; }
             notice.addEventListener( 'click', function( e ) {
                 if ( ! e.target.classList.contains( 'notice-dismiss' ) ) { return; }
-                var nonce = notice.dataset.nonce;
                 var fd = new FormData();
                 fd.append( 'action', 'uwgs_dismiss_scan_notice' );
-                fd.append( 'nonce', nonce );
-                fetch( <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>, { method: 'POST', body: fd } );
+                fd.append( 'nonce', notice.dataset.nonce );
+                fd.append( 'dismiss_type', notice.dataset.dismissType );
+                fetch( <?php echo wp_json_encode( $ajax_url ); ?>, { method: 'POST', body: fd } );
             } );
         } )();
         </script>
         <?php
     }
 
+    public function ajax_dismiss_scan_notice() {
+        check_ajax_referer( self::NONCE_UNUSED_ACTION, 'nonce' );
+        if ( ! current_user_can( 'upload_files' ) ) { wp_send_json_error( 'Permission denied.' ); }
+        $uid  = get_current_user_id();
+        $type = isset( $_POST['dismiss_type'] ) ? sanitize_key( $_POST['dismiss_type'] ) : 'manual';
+        if ( $type === 'cron' ) {
+            update_user_meta( $uid, '_uwgs_cron_notice_dismissed', get_option( self::OPTION_UNUSED_NEW_SCAN_TIME, 0 ) );
+        } else {
+            update_user_meta( $uid, '_uwgs_scan_notice_dismissed', get_option( self::OPTION_UNUSED_LAST_SCAN, 0 ) );
+        }
+        wp_send_json_success();
+    }
+
     private function set_scan_notice_flags() {
-        // Reset dismissed flag for all admins so they see the notice on next login
         global $wpdb;
         $wpdb->delete( $wpdb->usermeta, array( 'meta_key' => '_uwgs_scan_notice_dismissed' ), array( '%s' ) );
     }
 
     private function log_scan_to_stream() {
-        if ( ! function_exists( 'do_action' ) ) { return; }
-        $stats   = $this->get_unused_stats();
-        $unused  = $stats['unused'];
-        $uncert  = $stats['uncertain'];
-        // Stream log entry — visible in Stream > Activity for all admins
-        do_action( 'wp_stream_log_data', null, array(
-            'connector' => 'uwgs-media-tool',
-            'message'   => sprintf(
+        $stats = $this->get_unused_stats();
+        $this->log_to_stream(
+            sprintf(
                 /* translators: 1: unused count, 2: uncertain count */
-                __( 'Unused media scan complete: %1$d unused, %2$d uncertain', 'uwgs-alt-text-tool' ),
-                $unused, $uncert
+                __( 'Manual unused media scan complete: %1$d unused, %2$d uncertain.', 'uwgs-alt-text-tool' ),
+                $stats['unused'], $stats['uncertain']
             ),
-            'args'      => array( 'unused' => $unused, 'uncertain' => $uncert ),
-            'object_id' => null,
-            'context'   => 'scan',
-            'action'    => 'scanned',
-        ) );
+            'scan', 'scanned'
+        );
     }
 
     // =========================================================================
@@ -3930,3 +4123,4 @@ add_action( 'edit_attachment',                 array( 'UWGS_Alt_Text_Tool', 'cle
 add_action( 'add_attachment',                  array( 'UWGS_Alt_Text_Tool', 'clear_stats_cache' ) );
 
 add_action( 'plugins_loaded', array( 'UWGS_Alt_Text_Tool', 'init' ) );
+register_deactivation_hook( __FILE__, array( 'UWGS_Alt_Text_Tool', 'deactivate' ) );
